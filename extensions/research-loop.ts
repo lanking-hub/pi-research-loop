@@ -13,6 +13,7 @@
  *   /rl start    启动轮询
  *   /rl stop     停止轮询
  *   /rl poll     立刻轮询一次
+ *   /rl doctor   逐项实测环境，告诉你还差什么（首次配置时用这个）
  *
  * 配置：~/.pi/agent/research-loop.json（全局）或 <项目>/.pi/research-loop.json（项目级）
  *
@@ -23,6 +24,8 @@
  * 会被 pi 加载两次，导致重复唤醒。
  */
 
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { isConfigured, loadConfig, PLACEHOLDER, type Config } from "../lib/config.ts";
@@ -174,6 +177,87 @@ async function poll(pi: ExtensionAPI): Promise<void> {
 	maybeWake(pi);
 }
 
+/**
+ * 逐项实测环境，把「首次配置清单」变成自动检查。
+ * 只做只读检查，不启动任何东西。
+ */
+async function doctor(): Promise<void> {
+	cfg = loadConfig();
+	const lines: string[] = [];
+	let problems = 0;
+
+	const missing: string[] = [];
+	if (cfg.sshHost === PLACEHOLDER) missing.push("sshHost");
+	if (cfg.runsPath === PLACEHOLDER) missing.push("runsPath");
+	if (cfg.statusCommand === PLACEHOLDER) missing.push("statusCommand");
+	if (cfg.startCommand === PLACEHOLDER) missing.push("startCommand");
+
+	if (missing.length > 0) {
+		problems += 1;
+		lines.push(`✗ 配置未填：${missing.join(", ")}`);
+		lines.push(`  填 ~/.pi/agent/research-loop.json 或 <项目>/.pi/research-loop.json`);
+	} else {
+		lines.push("✓ 配置字段已填");
+
+		const ping = await runSsh(cfg.sshHost, "echo ok", cfg.sshTimeoutSec);
+		if (ping.ok && ping.out.trim().startsWith("ok")) {
+			lines.push(`✓ ssh 免密连通：${cfg.sshHost}`);
+		} else {
+			problems += 1;
+			lines.push(`✗ ssh 连不通：${cfg.sshHost}`);
+			lines.push(`  ${(ping.err.trim() || ping.out.trim() || "无输出").slice(0, 200)}`);
+			lines.push("  检查：~/.ssh/config 有这个 Host 吗？配了免密 key 吗？");
+		}
+
+		const dir = await runSsh(
+			cfg.sshHost,
+			`test -d ${JSON.stringify(cfg.runsPath)} && echo yes || echo no`,
+			cfg.sshTimeoutSec,
+		);
+		if (dir.out.trim() === "yes") {
+			lines.push(`✓ runs 目录存在：${cfg.runsPath}`);
+		} else {
+			problems += 1;
+			lines.push(`✗ runs 目录不存在：${cfg.runsPath}`);
+			lines.push(`  服务器上先 mkdir -p ${cfg.runsPath}`);
+		}
+
+		const st = await runSsh(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
+		if (!st.ok) {
+			problems += 1;
+			lines.push("✗ statusCommand 执行失败");
+			lines.push(`  ${(st.err.trim() || st.out.trim() || "无输出").slice(0, 200)}`);
+			lines.push("  检查：脚本传上去了吗？chmod +x 了吗？RUNS_DIR 对吗？");
+		} else if (parseStatus(st.out).length === 0) {
+			lines.push("-- statusCommand 能跑，但还没有任何 run（没跑过实验时正常）");
+		} else {
+			lines.push(`✓ statusCommand 正常，${parseStatus(st.out).length} 个 run`);
+		}
+
+		const gpu = await runSsh(cfg.sshHost, cfg.gpuCommand, cfg.sshTimeoutSec);
+		if (gpu.ok && gpu.out.trim()) {
+			lines.push("✓ gpuCommand 可跑");
+		} else {
+			problems += 1;
+			lines.push("✗ gpuCommand 跑不了，换一个（服务器没装 gpustat 的话用 nvidia-smi）");
+		}
+	}
+
+	// 项目级文件（跟着 cwd）
+	for (const f of [".auto/goal.md", ".auto/notes.md", "AGENTS.md"]) {
+		if (existsSync(join(process.cwd(), f))) {
+			lines.push(`✓ ${f}`);
+		} else {
+			lines.push(`-- 缺少 ${f}（从包里 templates/ 拷到项目根目录）`);
+		}
+	}
+
+	lines.push("");
+	lines.push(problems > 0 ? `共 ${problems} 项待处理` : "全部就绪，可以 /rl start");
+
+	notify(lines.join("\n"), problems > 0 ? "warning" : "info");
+}
+
 function startPolling(pi: ExtensionAPI): void {
 	if (polling) return;
 	polling = true;
@@ -194,7 +278,7 @@ function stopPolling(): void {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("rl", {
-		description: "research-loop: status / start / stop / poll",
+		description: "research-loop: status / start / stop / poll / doctor",
 		handler: async (args, ctx) => {
 			lastCtx = ctx;
 			cfg = loadConfig();
@@ -231,7 +315,12 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			notify("用法：/rl [status|start|stop|poll]", "warning");
+			if (a === "doctor" || a === "check") {
+				await doctor();
+				return;
+			}
+
+			notify("用法：/rl [status|start|stop|poll|doctor]", "warning");
 		},
 	});
 

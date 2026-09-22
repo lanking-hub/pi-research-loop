@@ -88,6 +88,7 @@ ssh gpu-server 'chmod +x ~/bin/run_exp.sh ~/bin/run_status.sh'
 重启 pi（`/reload` 也行），然后：
 
 ```bash
+/rl doctor    # 先跑这个：逐项实测环境，告诉你还差什么
 /rl status    # 看状态
 /rl start     # 启动轮询
 /rl stop      # 停
@@ -95,6 +96,27 @@ ssh gpu-server 'chmod +x ~/bin/run_exp.sh ~/bin/run_status.sh'
 ```
 
 然后直接跟 agent 说你要做什么，它会起第一个实验，之后就是自动循环了。
+
+### 首次配置：用 `/rl doctor` 自查
+
+上面 5 步里任何一步填错，症状都是「轮询静默不动」，很难查。所以先跑：
+
+```bash
+/rl doctor
+```
+
+它会实测并逐项报告：
+
+| 检查项 | 不通过时 |
+|---|---|
+| 配置 4 个必填字段 | 列出缺哪几个，并告诉配置文件路径 |
+| `ssh <host>` 免密连通 | 提示检查 `~/.ssh/config` 和 key |
+| 服务器上 `runsPath` 是否存在 | 提示先 `mkdir -p` |
+| `statusCommand` 能否执行、输出格式对不对 | 提示检查脚本是否传上去、`chmod +x`、`RUNS_DIR` 是否正确 |
+| `gpuCommand` 能否执行 | 提示没装 gpustat 就换 nvidia-smi |
+| 项目里有没有 `.auto/goal.md` / `.auto/notes.md` / `AGENTS.md` | 提示从 `templates/` 拷 |
+
+全绿了再 `/rl start`。
 
 ---
 
@@ -178,7 +200,8 @@ pi install git:github.com/<you>/pi-research-loop
 2. **Server**: copy `server/*.sh` to the server, `chmod +x`.
 3. **Config**: copy `templates/research-loop.json` to `~/.pi/agent/research-loop.json`, fill in `sshHost` / `runsPath` / `statusCommand` / `startCommand`.
 4. **Rules**: copy `templates/AGENTS.research.md` to your project as `AGENTS.md`; add `.auto/goal.md` and `.auto/notes.md`.
-5. **Run**: restart pi, then `/rl start`.
+5. **Verify**: restart pi, run `/rl doctor` — it checks ssh, paths, scripts and project files and tells you what's still missing.
+6. **Run**: `/rl start`.
 
 Key design: **the extension only polls and wakes — it never judges.** Polling is plain `ssh` (zero tokens); only the wake-up costs a model call. The `DONE` file is the only contract between your experiments and the extension, and its contents are never parsed — so you don't need a fixed metric schema.
 
