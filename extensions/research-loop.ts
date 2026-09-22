@@ -13,6 +13,7 @@
  *   /rl start    启动轮询
  *   /rl stop     停止轮询
  *   /rl poll     立刻轮询一次
+ *   /rl init     把 templates/ 生成到当前项目（已存在的文件不覆盖）
  *   /rl doctor   逐项实测环境，告诉你还差什么（首次配置时用这个）
  *
  * 配置：~/.pi/agent/research-loop.json（全局）或 <项目>/.pi/research-loop.json（项目级）
@@ -24,8 +25,9 @@
  * 会被 pi 加载两次，导致重复唤醒。
  */
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { isConfigured, loadConfig, PLACEHOLDER, type Config } from "../lib/config.ts";
@@ -258,6 +260,55 @@ async function doctor(): Promise<void> {
 	notify(lines.join("\n"), problems > 0 ? "warning" : "info");
 }
 
+/**
+ * 把包里 templates/ 的模板生成到当前项目目录，省掉手动拷贝。
+ * 已存在的文件一律跳过，不覆盖。
+ */
+function init(): void {
+	const tplDir = join(dirname(fileURLToPath(import.meta.url)), "..", "templates");
+	if (!existsSync(tplDir)) {
+		notify(`找不到模板目录：${tplDir}`, "error");
+		return;
+	}
+
+	const cwd = process.cwd();
+	const targets = [
+		{ from: "AGENTS.research.md", to: "AGENTS.md", hint: "agent 规则" },
+		{ from: "goal.md", to: join(".auto", "goal.md"), hint: "你写方向" },
+		{ from: "notes.md", to: join(".auto", "notes.md"), hint: "agent 写进度" },
+		{ from: "research-loop.json", to: join(".pi", "research-loop.json"), hint: "项目级配置" },
+	];
+
+	const lines: string[] = [];
+	for (const t of targets) {
+		const src = join(tplDir, t.from);
+		const dest = join(cwd, t.to);
+		if (!existsSync(src)) {
+			lines.push(`✗ 模板缺失：${t.from}`);
+			continue;
+		}
+		if (existsSync(dest)) {
+			lines.push(`-- 已存在，跳过：${t.to}`);
+			continue;
+		}
+		try {
+			mkdirSync(dirname(dest), { recursive: true });
+			writeFileSync(dest, readFileSync(src));
+			lines.push(`✓ 已生成：${t.to}  (${t.hint})`);
+		} catch (e) {
+			lines.push(`✗ 写入失败：${t.to} — ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	lines.push("");
+	lines.push("下一步：");
+	lines.push("1. 填 .pi/research-loop.json 里的 4 个 TODO");
+	lines.push("2. /reload（新生成的 AGENTS.md 要重启才加载）");
+	lines.push("3. /rl doctor 自查");
+
+	notify(lines.join("\n"), "info");
+}
+
 function startPolling(pi: ExtensionAPI): void {
 	if (polling) return;
 	polling = true;
@@ -278,7 +329,7 @@ function stopPolling(): void {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("rl", {
-		description: "research-loop: status / start / stop / poll / doctor",
+		description: "research-loop: status / start / stop / poll / init / doctor",
 		handler: async (args, ctx) => {
 			lastCtx = ctx;
 			cfg = loadConfig();
@@ -315,12 +366,17 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			if (a === "init") {
+				init();
+				return;
+			}
+
 			if (a === "doctor" || a === "check") {
 				await doctor();
 				return;
 			}
 
-			notify("用法：/rl [status|start|stop|poll|doctor]", "warning");
+			notify("用法：/rl [status|start|stop|poll|init|doctor]", "warning");
 		},
 	});
 

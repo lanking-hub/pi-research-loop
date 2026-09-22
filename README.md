@@ -77,17 +77,32 @@ ssh gpu-server 'chmod +x ~/bin/run_exp.sh ~/bin/run_status.sh'
 }
 ```
 
-### 4. 给你的项目加规则
+### 4. 初始化项目文件
 
-把 `templates/AGENTS.research.md` 拷成项目根目录的 `AGENTS.md`（已有就追加——pi 会叠加加载多份 AGENTS.md，不会覆盖）。
+在**你的项目目录**里跑（pi 的文件都跟着当前目录走）：
 
-再建 `templates/goal.md` → `.auto/goal.md`（你写方向）、`templates/notes.md` → `.auto/notes.md`（agent 写进度）。
+```bash
+cd ~/research && pi
+/rl init
+```
+
+会生成：
+
+| 生成的文件 | 用途 |
+|---|---|
+| `AGENTS.md` | agent 规则（已有就跳过，不覆盖——pi 会叠加加载多份，你手动追加即可） |
+| `.auto/goal.md` | **你写**：方法、目标、看哪些指标、大致方向 |
+| `.auto/notes.md` | agent 写：每轮重写，含死胡同 |
+| `.pi/research-loop.json` | 项目级配置（覆盖全局），里面 4 个 TODO 要填 |
+
+生成完要 `/reload`，新 `AGENTS.md` 才会被加载。
 
 ### 5. 跑
 
 重启 pi（`/reload` 也行），然后：
 
 ```bash
+/rl init      # 生成项目文件（首次）
 /rl doctor    # 先跑这个：逐项实测环境，告诉你还差什么
 /rl status    # 看状态
 /rl start     # 启动轮询
@@ -199,8 +214,8 @@ pi install git:github.com/<you>/pi-research-loop
 1. **SSH**: add a passwordless `Host` entry in `~/.ssh/config`.
 2. **Server**: copy `server/*.sh` to the server, `chmod +x`.
 3. **Config**: copy `templates/research-loop.json` to `~/.pi/agent/research-loop.json`, fill in `sshHost` / `runsPath` / `statusCommand` / `startCommand`.
-4. **Rules**: copy `templates/AGENTS.research.md` to your project as `AGENTS.md`; add `.auto/goal.md` and `.auto/notes.md`.
-5. **Verify**: restart pi, run `/rl doctor` — it checks ssh, paths, scripts and project files and tells you what's still missing.
+4. **Init**: `cd <your-project> && pi`, then `/rl init` — generates `AGENTS.md`, `.auto/goal.md`, `.auto/notes.md`, `.pi/research-loop.json`. Then `/reload`.
+5. **Verify**: run `/rl doctor` — it checks ssh, paths, scripts and project files and tells you what's still missing.
 6. **Run**: `/rl start`.
 
 Key design: **the extension only polls and wakes — it never judges.** Polling is plain `ssh` (zero tokens); only the wake-up costs a model call. The `DONE` file is the only contract between your experiments and the extension, and its contents are never parsed — so you don't need a fixed metric schema.

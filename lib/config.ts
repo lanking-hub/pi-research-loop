@@ -52,8 +52,14 @@ export function loadConfig(): Config {
 	for (const p of configPaths()) {
 		try {
 			if (!existsSync(p)) continue;
-			const raw = JSON.parse(readFileSync(p, "utf8")) as Partial<Config>;
-			merged = { ...merged, ...raw };
+			const raw = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
+			const clean: Record<string, unknown> = {};
+			for (const [k, v] of Object.entries(raw)) {
+				// 占位值不覆盖上一层已经填好的值，这样「部分填写的项目级配置」是安全的
+				if (v === PLACEHOLDER) continue;
+				if (k in merged) clean[k] = v;
+			}
+			merged = { ...merged, ...clean };
 		} catch {
 			// 配置损坏就跳过，用默认值继续
 		}
