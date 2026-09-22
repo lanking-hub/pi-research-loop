@@ -4,6 +4,8 @@
 
 适用于任何「改代码 / 调方法 → 跑实验 → 看结果」的计算机科研场景。
 
+> **Windows 用户**：直接看 [docs/setup-windows.md](docs/setup-windows.md)，那是一份从零到跑通的完整清单。
+
 ---
 
 ## 核心思路
@@ -221,6 +223,20 @@ pi install git:github.com/<you>/pi-research-loop
 Key design: **the extension only polls and wakes — it never judges.** Polling is plain `ssh` (zero tokens); only the wake-up costs a model call. The `DONE` file is the only contract between your experiments and the extension, and its contents are never parsed — so you don't need a fixed metric schema.
 
 ---
+
+## 文档
+
+| 文档 | 给谁看 |
+|---|---|
+| [docs/setup-windows.md](docs/setup-windows.md) | **要在 Windows 上跑起来的人**——从零到循环跑通的完整清单 |
+| [docs/internals.md](docs/internals.md) | 要继续开发这个扩展的人——实测确认过的机制、踩过的坑、未实现的设计 |
+
+## 路线图
+
+- [ ] **baseline 批量跑扩展**：拉取同类方法、逐个跑、结果落盘（设计未定，欢迎讨论）
+- [ ] **模型排序链与限额自动切换**：`lib/model-chain.ts`，见 [internals §8](docs/internals.md#8-模型切换未实现设计已定)
+- [ ] **`/rl init` 模板内嵌**：去掉对 `import.meta.url` 定位 `templates/` 的路径依赖（Windows 上若出问题就做）
+- [ ] **结果结构化**：目前 `DONE` 放 exit code + 日志尾部，扩展不解析内容。想要结构化指标就改 `run_exp.sh` 里写 `DONE` 那段，扩展不用动
 
 ## License
 
