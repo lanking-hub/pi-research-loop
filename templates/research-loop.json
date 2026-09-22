@@ -1,0 +1,14 @@
+{
+  "_readme": "拷到 ~/.pi/agent/research-loop.json（全局）或 <项目>/.pi/research-loop.json（项目级）。项目级覆盖全局。两台机器可以各有一份不同的值。",
+
+  "sshHost": "TODO",
+  "runsPath": "TODO",
+  "statusCommand": "TODO",
+  "startCommand": "TODO",
+
+  "gpuCommand": "gpustat --no-color",
+  "pollIntervalSec": 60,
+  "mergeWindowSec": 60,
+  "sshTimeoutSec": 15,
+  "sshFailEscalate": 3
+}

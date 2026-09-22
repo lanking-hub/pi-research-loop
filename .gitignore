@@ -1,0 +1,11 @@
+node_modules/
+
+# 本机配置：含服务器地址等，不要提交（只忽略仓库根目录的，templates/ 里的模板要提交）
+/research-loop.json
+
+# 会话状态与实验产物
+.auto/
+runs/
+
+*.log
+.DS_Store
