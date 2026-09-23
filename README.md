@@ -35,7 +35,7 @@
 | 怎么起实验 | **你 / agent 决定**——`nohup`、`sbatch`、`docker`、`conda` 都行 | 固定的 `run_exp.sh` |
 | 扩展盯什么 | `.auto/runs.txt` 里登记的路径下有没有 `DONE` | 固定 runs 目录 + 服务器脚本报状态 |
 | 要在服务器部署脚本吗 | **不需要** | 需要 `server/*.sh` |
-| 必填配置 | 只有 `sshHost` | `sshHost` + `runsPath` + `statusCommand` |
+| 必填配置 | **无（零配置）** | `sshHost` + `runsPath` + `statusCommand` |
 | 适合 | 变数多的迭代探索 | 流程固定的批量跑 |
 
 **table 模式只认一个约定**：实验跑完时，在它的输出目录里写一个 `DONE` 文件（内容随便，建议放指标）。
@@ -62,31 +62,25 @@ pi install git:github.com/<你>/pi-research-loop
 
 ## 快速开始
 
-### 1. 进项目目录，生成文件
+### 1. 进项目目录，一键整备
 
 pi 的文件都跟着当前目录走，所以先建个「控制台目录」（代码不用放本地）：
 
 ```bash
 cd ~/research && pi
-/rl init
+/rl setup
 ```
+
+它会先生成项目文件：
 
 | 生成的文件 | 用途 |
 |---|---|
-| `AGENTS.md` | agent 规则（已有就跳过，不覆盖） |
+| `AGENTS.md` | agent 规则。**已有就在末尾追加一块**，你的内容不动 |
 | `.auto/goal.md` | **你写**：方法、目标、看哪些指标、大致方向 |
 | `.auto/notes.md` | agent 写：每轮重写，含死胡同 |
 | `.auto/runs.txt` | 正在跑的实验（agent 增删） |
 
-**不需要任何配置文件**——ssh 别名是内部固定常量，`/rl setup` 自动写进 `~/.ssh/config`。
-
-### 2. 一键整备
-
-```bash
-/rl setup
-```
-
-**只问两件事**：服务器地址、用户名。
+然后配 ssh。**只问两件事**：服务器地址、用户名。
 
 然后自动做完：生成钥匙对 → 把别名写进 `~/.ssh/config` → 登记指纹 → 配好免密。
 
@@ -98,15 +92,15 @@ cd ~/research && pi
 
 ```bash
 /reload       # 让新生成的 AGENTS.md 生效
-/rl doctor    # 逐项实测：ssh、目录、脚本、配置、项目文件
+/rl doctor    # 逐项实测：ssh 连通、登记表、项目文件
 ```
 
-### 4. 写方向，开跑
+### 3. 写方向，开跑
 
 `.auto/goal.md` 里写：方法、目标、看哪些指标、大致方向、并发上限。然后：
 
 ```bash
-/rl start
+/rl
 ```
 
 跟着直接跟 agent 说要做什么，它会起第一个实验，之后自动循环。
@@ -119,14 +113,12 @@ cd ~/research && pi
 /rl status        看状态
 /rl goal <文本>    往 .auto/goal.md 加一条建议，下一轮自动生效
 /rl doctor        环境体检（只读）
-/rl setup         首次一站式：生成项目文件 + 配 ssh + 写配置
+/rl setup         首次一站式：生成项目文件 + 配 ssh（不需要配置文件）
 ```
 
-`setup` 已经包含了原来 `init` 做的事，不用分开跑。
+### 用 `/rl doctor` 自查
 
-### 首次配置：用 `/rl doctor` 自查
-
-上面 5 步里任何一步填错，症状都是「轮询静默不动」，很难查。所以先跑：
+环境配错的症状是「轮询静默不动」——不报错、不唤醒，很难查。所以先跑：
 
 ```bash
 /rl doctor
@@ -136,13 +128,13 @@ cd ~/research && pi
 
 | 检查项 | 不通过时 |
 |---|---|
-| 配置 4 个必填字段 | 列出缺哪几个，并告诉配置文件路径 |
-| `ssh <host>` 免密连通 | 提示检查 `~/.ssh/config` 和 key |
-| 服务器上 `runsPath` 是否存在 | 提示先 `mkdir -p` |
-| `statusCommand` 能否执行、输出格式对不对 | 提示检查脚本是否传上去、`chmod +x`、`RUNS_DIR` 是否正确 |
-| 项目里有没有 `.auto/goal.md` / `.auto/notes.md` / `AGENTS.md` | 提示从 `templates/` 拷 |
+| ssh 别名能否免密连通 | 提示检查 `~/.ssh/config` 和 key，或重跑 `/rl setup` |
+| `.auto/runs.txt` 有没有内容 | 还没登记实验时正常 |
+| 项目里有没有 `.auto/goal.md` / `.auto/notes.md` / `AGENTS.md` | 提示重跑 `/rl setup` |
 
-全绿了再 `/rl start`。
+（dir 模式还会额外查 runs 目录和 `statusCommand`。）
+
+全绿了再 `/rl`。
 
 ---
 
@@ -247,8 +239,9 @@ Key design: **the extension only polls and wakes — it never judges.** Polling 
 - [ ] **本地模式**：pi 直接装在服务器上时不走 ssh（`runSsh` 包一层即可，约 10 行）。目前只支持"pi 在本地 + ssh 到服务器"
 - [ ] **baseline 批量跑扩展**：拉取同类方法、逐个跑、结果落盘（设计未定，欢迎讨论）
 - [ ] **模型排序链与限额自动切换**：`lib/model-chain.ts`，见 [internals §8](docs/internals.md#8-模型切换未实现设计已定)
-- [ ] **`/rl init` 模板内嵌**：去掉对 `import.meta.url` 定位 `templates/` 的路径依赖（Windows 上若出问题就做）
-- [ ] **结果结构化**：目前 `DONE` 放 exit code + 日志尾部，扩展不解析内容。想要结构化指标就改 `run_exp.sh` 里写 `DONE` 那段，扩展不用动
+- [ ] **模板内嵌**：去掉对 `import.meta.url` 定位 `templates/` 的路径依赖（Windows 上若出问题就做）
+- [ ] **英文 README**（面向更广的研究生群体）
+- [ ] **云 GPU 平台 / Slurm 上手说明 + FAQ 排障**
 
 ## License
 

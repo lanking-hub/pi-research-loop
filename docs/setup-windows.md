@@ -30,35 +30,29 @@ pi install git:github.com/lanking-hub/pi-research-loop
 
 > ⚠️ 如果你之前手动放过一个 `research-loop.ts` 在 `~/.pi/agent/extensions/`，**必须先删掉**，否则和装进来的包重复加载，`/rl` 的命令和工具会各注册两次。
 
-## 4. 建控制台目录
+## 4. 建控制台目录 + 一键整备
 
 ```bash
 mkdir C:\Users\<你>\research
 cd C:\Users\<你>\research
 pi
-/rl init
-/reload
-```
-
-`/rl init` 生成（已存在的不覆盖）：
-
-```
-AGENTS.md                   agent 规则
-.auto/goal.md               你写方向
-.auto/notes.md              agent 写进度
-.pi/research-loop.json      项目级配置
-```
-
-`/reload` 是必须的——新生成的 `AGENTS.md` 要重启才加载。
-
-> 两个目录是**分层**不是冗余：`.pi/` 是 pi 的平台目录（含机器相关的 ssh 配置，别进 git），
-> `.auto/` 是你的内容目录（goal/notes 要进 git、跨机器同步）。
-
-## 5. 一键整备（交互式）
-
-```bash
 /rl setup
 ```
+
+`/rl setup` 先生成项目文件（已有就不覆盖），再配 ssh：
+
+```
+AGENTS.md              agent 规则（已有就在末尾追加一块）
+.auto/goal.md          你写方向
+.auto/notes.md         agent 写进度
+.auto/runs.txt         正在跑的实验
+```
+
+**不需要配置文件。**
+
+配完要 `/reload`，新生成的 `AGENTS.md` 才会加载。
+
+> `.auto/` 是你的内容目录（goal/notes 建议进 git、跨机器同步）。
 
 **只问两件事**：服务器地址 → 登录用户名。
 
@@ -85,30 +79,27 @@ type "C:\Users\<你>\.ssh\id_ed25519.pub" | ssh <用户>@<服务器> "mkdir -p ~
 
 > **无密码私钥**：生成的钥匙没有密码（免密登录的前提）。别外传、别提交进 git。
 
-查显卡由 agent 自己 ssh 完成（`gpustat`，没装就用 `nvidia-smi`），不用配置。
+查显卡由 agent 自己 ssh 完成（`gpustat`，没装就用
+`nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv`），不用配置。
 
-```
-nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv
-```
-
-## 6. 自查
+## 5. 自查
 
 ```bash
 /rl doctor
 ```
 
-逐项实测：配置字段 / ssh 免密连通 / 登记表 / 项目文件。全绿再下一步。
+逐项实测：ssh 免密连通 / 登记表 / 项目文件。全绿再下一步。
 
-## 7. 写方向
+## 6. 写方向
 
 `.auto/goal.md` 里写：方法、目标、看哪些指标（每个是越大越好还是越小越好）、大致方向、并发上限。
 
 **这一步只能你写**，扩展替不了。
 
-## 8. 启动
+## 7. 启动
 
 ```bash
-/rl start
+/rl
 ```
 
 然后直接跟 agent 说要做什么，它会起第一个实验，之后自动循环。
