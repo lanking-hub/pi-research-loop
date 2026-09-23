@@ -11,7 +11,8 @@
 | `/rl` | **开始循环**（默认动作；已在跑则显示状态） |
 | `/rl stop` | 停止 |
 | `/rl status` | 两行：循环状态 + 实验状态 |
-| `/rl goal <文本>` | 往 `.auto/goal.md` 的「临时建议」加一条 |
+| `/rl goal <文本>` | 往 goal 的「临时建议」加一条，下一轮 agent 自动读到 |
+| `/rl goal -t <工作流> <文本>` | 写到 `.auto/goal-<工作流>.md`（按工作流拆 goal 时用） |
 | `/rl agents` | 已有 AGENTS.md 时让 agent 合并（去重 + 精简），背景放块外、规则逐字保留 |
 | `/rl doctor` | 环境体检（只读） |
 | `/rl setup` | 首次一站式：生成项目文件 + 配 ssh（需要 TUI 模式） |
@@ -99,7 +100,16 @@ path,pid,track,note
 
 一份表就行，不要拆成多份——拆了就要跑多个循环（= 多个 pi 实例），它们互相看不见，会抢同一批卡。
 
-用 `track` 列区分工作流，用 `note` 写清楚在试什么。`goal` 可以按工作流分开放在各自的子目录里。
+用 `track` 列区分工作流，用 `note` 写清楚在试什么。
+
+`goal` 默认只有一份 `.auto/goal.md`。要按工作流拆开就改名成
+`.auto/goal-iter.md` / `.auto/goal-baseline.md`（本地放代码的话用子目录也行，
+见 `templates/AGENTS.research.md` 的工作流表）。
+拆开之后：
+
+- `/rl goal -t baseline <文本>` → 写到 `.auto/goal-baseline.md`
+- `/rl doctor` 会认出所有 `goal*.md`，不会因为改名而误报缺失
+- 记得把 AGENTS.md 里那张工作流表改成你实际的文件名——**那是给 agent 的索引**
 
 ---
 

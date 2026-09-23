@@ -36,7 +36,7 @@
  * 会被 pi 加载两次，导致重复唤醒。
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -139,7 +139,8 @@ function helpText(): string {
 		"  /rl              开始循环（默认动作；已在跑则显示状态）",
 		"  /rl stop         停止循环",
 		"  /rl status       看状态：循环在不在跑 + 实验进展",
-		"  /rl goal <文本>   往 .auto/goal.md 加一条建议，下一轮 agent 自动读到",
+		"  /rl goal <文本>   往 goal 的「临时建议」加一条，下一轮 agent 自动读到",
+		"                   加 -t <工作流> 写到 .auto/goal-<工作流>.md",
 		"  /rl agents       项目里已有 AGENTS.md 时，让 agent 帮你合并（去重 + 精简）",
 		"  /rl doctor       环境体检（只读）：ssh、目录、脚本、项目文件",
 		"  /rl setup        首次一站式：生成项目文件 + 交互式配 ssh（需要 TUI 模式）",
@@ -513,12 +514,26 @@ async function doctor(): Promise<void> {
 
 	}
 
-	// 项目级文件（跟着 cwd）
-	for (const f of [".auto/goal.md", ".auto/notes.md", "AGENTS.md"]) {
+	// 项目级文件（跟着 cwd）。
+	// goal 可能按工作流拆成多份（goal-iter.md / goal-baseline.md），找到任一就算有。
+	const autoDir = join(process.cwd(), ".auto");
+	const goalFiles = existsSync(autoDir)
+		? readdirSync(autoDir).filter((f) => /^goal[A-Za-z0-9_-]*\.md$/i.test(f))
+		: [];
+	if (goalFiles.length > 0) {
+		lines.push(
+			goalFiles.length === 1
+				? `✓ .auto/${goalFiles[0]}`
+				: `✓ goal ${goalFiles.length} 份：${goalFiles.map((f) => `.auto/${f}`).join("、")}`,
+		);
+	} else {
+		lines.push(`-- 缺少 .auto/goal.md（跑 /rl setup 会生成）`);
+	}
+	for (const f of [".auto/notes.md", "AGENTS.md"]) {
 		if (existsSync(join(process.cwd(), f))) {
 			lines.push(`✓ ${f}`);
 		} else {
-			lines.push(`-- 缺少 ${f}（从包里 templates/ 拷到项目根目录）`);
+			lines.push(`-- 缺少 ${f}（跑 /rl setup 会生成）`);
 		}
 	}
 
@@ -696,12 +711,21 @@ function ensureProjectFiles(): string[] {
 }
 
 /**
- * /rl goal —— 直接往 .auto/goal.md 的「临时建议」里加一条。
+ * goal 文件的路径。按工作流拆分时是 `.auto/goal-<track>.md`，
+ * 不拆就是 `.auto/goal.md`。track 只允许安全字符，避免写成别的路径。
+ */
+function goalPath(track: string | undefined): string {
+	const name = track && /^[A-Za-z0-9_-]+$/.test(track) ? `goal-${track}.md` : "goal.md";
+	return join(process.cwd(), ".auto", name);
+}
+
+/**
+ * /rl goal —— 直接往 goal 的「临时建议」里加一条。
  * 省得手动开文件改；下一轮 agent 会自动读到。
  */
-function addGoal(text: string): string {
+function addGoal(text: string, track: string | undefined): string {
 	const HEADING = "## 临时建议";
-	const p = join(process.cwd(), ".auto", "goal.md");
+	const p = goalPath(track);
 
 	let cur = "";
 	if (existsSync(p)) {
@@ -725,7 +749,8 @@ function addGoal(text: string): string {
 
 	mkdirSync(dirname(p), { recursive: true });
 	writeFileSync(p, out);
-	return `已写进 .auto/goal.md 的「${HEADING}」：\n  ${line}\n\n下一轮 agent 会自动读到。`;
+	const rel = `.auto/${p.split(/[\\/]/).pop()}`;
+	return `已写进 ${rel} 的「${HEADING}」：\n  ${line}\n\n下一轮 agent 会自动读到。`;
 }
 
 /**
@@ -826,12 +851,23 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (a === "goal" || a.startsWith("goal ")) {
-				const text = a.slice("goal".length).trim();
+				const rest = a.slice("goal".length).trim();
+				// /rl goal -t <工作流> <文本> —— 写到 .auto/goal-<工作流>.md
+				let track: string | undefined;
+				let text = rest;
+				const m = /^-t\s+([A-Za-z0-9_-]+)\s+([\s\S]*)$/.exec(rest);
+				if (m) {
+					track = m[1];
+					text = (m[2] ?? "").trim();
+				}
 				if (!text) {
-					notify("用法：/rl goal <想让 agent 知道的方向或建议>", "warning");
+					notify(
+						["用法：/rl goal <想让 agent 知道的方向或建议>", "或：/rl goal -t <工作流> <文本>"].join("\n"),
+						"warning",
+					);
 					return;
 				}
-				notify(addGoal(text), "info");
+				notify(addGoal(text, track), "info");
 				return;
 			}
 

@@ -111,7 +111,8 @@ Then just tell the agent what to work on. It launches the first experiment, and 
 /rl               Start the loop (default action; shows status if already running)
 /rl stop          Stop
 /rl status        Status
-/rl goal <text>   Append a note to .auto/goal.md, picked up next turn
+/rl goal <text>   Append a note to your goal file, picked up next turn
+                  (-t <track> writes to .auto/goal-<track>.md)
 /rl agents        Merge into an existing AGENTS.md (dedupe + condense) — done by the agent
 /rl doctor        Environment check (read-only)
 /rl setup         First-time: generate project files + configure ssh (needs TUI mode)
