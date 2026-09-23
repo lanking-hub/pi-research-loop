@@ -136,7 +136,6 @@ cd ~/research && pi
 | `ssh <host>` 免密连通 | 提示检查 `~/.ssh/config` 和 key |
 | 服务器上 `runsPath` 是否存在 | 提示先 `mkdir -p` |
 | `statusCommand` 能否执行、输出格式对不对 | 提示检查脚本是否传上去、`chmod +x`、`RUNS_DIR` 是否正确 |
-| `gpuCommand` 能否执行 | 提示没装 gpustat 就换 nvidia-smi |
 | 项目里有没有 `.auto/goal.md` / `.auto/notes.md` / `AGENTS.md` | 提示从 `templates/` 拷 |
 
 全绿了再 `/rl start`。
@@ -160,7 +159,7 @@ cd ~/research && pi
 ## 目录结构
 
 ```
-extensions/research-loop.ts   主扩展：轮询 + 唤醒 + gpu_status / start_run 工具
+extensions/research-loop.ts   主扩展：轮询 + 唤醒 + track_run 工具（+ start_run，dir 模式用）
 lib/config.ts                 配置读写（全局 → 项目级）
 lib/ssh.ts                    ssh 执行（跨平台，不走本地 shell）
 server/run_status.sh          服务器上跑，输出每个 run 的状态
@@ -204,7 +203,7 @@ runs/0007/
 大概率是你直接 `ssh ... nohup python` 起实验了——那样 run 不在 `runs/` 里，扩展根本看不到。必须用 `start_run` 工具或 `run_exp.sh`。
 
 **服务器没装 gpustat？**
-把 `gpuCommand` 换成 `nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv`。
+查显卡由 agent 自己 ssh 完成（AGENTS.md 里写死了这条要求），不用配任何东西。
 
 **我想让 DONE 里结构化地放指标？**
 改 `run_exp.sh` 里写 `DONE` 的那段就行——扩展不解析它的内容，你随便写。

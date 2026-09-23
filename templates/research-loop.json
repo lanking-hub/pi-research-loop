@@ -5,7 +5,7 @@
   "_mode": "table= agent 在 .auto/runs.txt 里登记实验路径，轮询只查 DONE（迭代用，兼容性最好，默认）；dir= 固定 runs 目录 + 服务器脚本（baseline 那种死流程用）",
   "mode": "table",
 
-  "_runsFile": "table 模式：agent 维护的待检查表，一行一个服务器绝对路径",
+  "_runsFile": "table 模式：agent 维护的待检查表，一行一个服务器绝对路径（可跟 pid）",
   "runsFile": ".auto/runs.txt",
 
   "_maxHours": "table 模式：登记后超过这么久还没 DONE 就提醒。这是防「忘了写 DONE」的唯一兜底，别设太长",
@@ -18,9 +18,6 @@
   "runsPath": "TODO",
   "statusCommand": "TODO",
   "startCommand": "TODO",
-
-  "_gpuCommand": "查显卡占用。没装 gpustat 就换 nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv",
-  "gpuCommand": "gpustat --no-color",
 
   "_pollIntervalSec": "轮询间隔（秒）。轮询是一次 ssh，零 token，不用为了省钱调大。",
   "pollIntervalSec": 60,

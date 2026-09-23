@@ -28,7 +28,7 @@ export interface Config {
 	/** 服务器上起实验脚本的调用命令 */
 	startCommand: string;
 	/** 查显卡占用的命令 */
-	gpuCommand: string;
+
 	/** 轮询间隔（秒） */
 	pollIntervalSec: number;
 	/** 合并窗口（秒）：攒一批再唤醒，且两次唤醒至少间隔这么久 */
@@ -46,7 +46,7 @@ export const DEFAULTS: Config = {
 	runsPath: PLACEHOLDER,
 	statusCommand: PLACEHOLDER,
 	startCommand: PLACEHOLDER,
-	gpuCommand: "gpustat --no-color",
+
 	pollIntervalSec: 60,
 	mergeWindowSec: 60,
 	sshTimeoutSec: 15,

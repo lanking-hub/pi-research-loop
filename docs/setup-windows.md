@@ -28,7 +28,7 @@
 pi install git:github.com/lanking-hub/pi-research-loop
 ```
 
-> ⚠️ 如果你之前手动放过一个 `research-loop.ts` 在 `~/.pi/agent/extensions/`，**必须先删掉**，否则和装进来的包重复加载，`/rl` 和 `gpu_status` 会各注册两次。
+> ⚠️ 如果你之前手动放过一个 `research-loop.ts` 在 `~/.pi/agent/extensions/`，**必须先删掉**，否则和装进来的包重复加载，`/rl` 的命令和工具会各注册两次。
 
 ## 4. 建控制台目录
 
@@ -84,7 +84,7 @@ type "C:\Users\<你>\.ssh\id_ed25519.pub" | ssh <用户>@<服务器> "mkdir -p ~
 
 > **无密码私钥**：生成的钥匙没有密码（免密登录的前提）。别外传、别提交进 git。
 
-服务器没装 `gpustat` 的话，把配置里的 `gpuCommand` 换成：
+查显卡由 agent 自己 ssh 完成（`gpustat`，没装就用 `nvidia-smi`），不用配置。
 
 ```
 nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv
@@ -96,7 +96,7 @@ nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=c
 /rl doctor
 ```
 
-逐项实测：配置字段 / ssh 免密连通 / runs 目录 / statusCommand / gpuCommand / 项目文件。全绿再下一步。
+逐项实测：配置字段 / ssh 免密连通 / 登记表 / 项目文件。全绿再下一步。
 
 ## 7. 写方向
 

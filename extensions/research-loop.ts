@@ -403,13 +403,6 @@ async function doctor(): Promise<void> {
 			}
 		}
 
-		const gpu = await runSsh(cfg.sshHost, cfg.gpuCommand, cfg.sshTimeoutSec);
-		if (gpu.ok && gpu.out.trim()) {
-			lines.push("✓ gpuCommand 可跑");
-		} else {
-			problems += 1;
-			lines.push("✗ gpuCommand 跑不了，换一个（服务器没装 gpustat 的话用 nvidia-smi）");
-		}
 	}
 
 	// 项目级文件（跟着 cwd）
@@ -664,29 +657,6 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "gpu_status",
-		label: "GPU Status",
-		description: "查询远程 GPU 服务器的显卡占用情况。起实验前必须先查，选空闲卡。",
-		promptSnippet: "查询远程服务器 GPU 占用",
-		promptGuidelines: ["连服务器一律走 ~/.ssh/config 里配置好的别名（原生 ssh），禁止 wsl ssh / 裸 IP"],
-		parameters: Type.Object({}),
-		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
-			cfg = loadConfig();
-			if (cfg.sshHost === PLACEHOLDER) {
-				return {
-					content: [{ type: "text", text: "gpu_status 未配置：请先填 sshHost" }],
-					details: { ok: false },
-				};
-			}
-			const res = await runSsh(cfg.sshHost, cfg.gpuCommand, cfg.sshTimeoutSec);
-			const text = res.ok
-				? res.out.trim() || "(空输出)"
-				: `ssh 失败：${res.err.trim() || res.out.trim() || "(无输出)"}`;
-			return { content: [{ type: "text", text }], details: { ok: res.ok } };
-		},
-	});
-
-	pi.registerTool({
 		name: "track_run",
 		label: "Track Run",
 		description:
@@ -763,7 +733,7 @@ export default function (pi: ExtensionAPI) {
 			"在远程服务器上起一个实验 run。**起实验必须走这个工具**，不要直接 ssh nohup，否则 run 不在管理内，永远不会被轮询到。",
 		promptSnippet: "在远程服务器上起一个受管理的实验 run",
 		promptGuidelines: [
-			"起实验前先用 gpu_status 查空闲卡，把空闲的卡号传给 start_run 的 gpu 参数",
+			"起实验前先 ssh 查显卡占用（gpustat / nvidia-smi），把空闲的卡号传给 start_run 的 gpu 参数",
 			"不要用 ssh + nohup 直接起实验，必须走 start_run",
 			"连服务器一律走 ~/.ssh/config 里配置好的别名（原生 ssh），禁止 wsl ssh / 裸 IP",
 		],
