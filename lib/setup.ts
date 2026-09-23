@@ -255,27 +255,38 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 			}
 		}
 
-		// 远端用 `tr -d '\r'` 而不是 `cat`：
-		// PowerShell 里 type 是 Get-Content 的别名，管道到 ssh 这种**原生程序**时
-		// 会带 CRLF，那个 '\r' 留在公钥行尾，sshd 可能认不出来 → 装了照样要密码。
-		// tr -d '\r' 两种终端通吃，cmd 下也无害（公钥本身不含 CR）。
-		const remoteTail =
-			`mkdir -p ~/.ssh && chmod 700 ~/.ssh && ` +
-			`tr -d '\\r' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`;
-		const installCmd = IS_WIN
-			? `type "${pubKeyPath.replace(/\//g, "\\")}" | ssh ${user}@${host} "${remoteTail}"`
-			: `cat ${pubKeyPath} | ssh ${user}@${host} "${remoteTail}"`;
+		// 装公钥的命令必须在 cmd.exe / PowerShell / zsh 下都被**原样**传递。
+		// 实测教训（2026-09-23）：`type 公钥 | ssh ... "tr -d '\r' >> ..."` 在 cmd 里
+		// 是对的，但 PowerShell 给原生命令传参时会按自己的规则重剥引号——单引号
+		// 消失，远端 bash 拿到散架的 `tr -d`（missing operand）+ `\r`（command not found）。
+		// 因此 Windows 版改成两条命令：
+		//   1) scp 把公钥文件按字节直传成服务器临时文件——PowerShell 管道注入 CRLF
+		//      的问题从根上消失，远端不再需要 tr；
+		//   2) 第二条 ssh 的远端命令里【零引号、零反斜杠、零 $】——任何 shell 都只会
+		//      原样传递。cmd 与 PowerShell 5.1/7 实测通过，scp/ssh 两路 md5 字节级一致。
+		// 代价：密码要输两次（scp 一次、ssh 一次）。
+		// macOS 保持管道版：zsh/bash 不会剥双引号字符串里的单引号，一条命令一次密码。
+		const winRemote =
+			"mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat ~/rl-pub.tmp >> ~/.ssh/authorized_keys && rm ~/rl-pub.tmp && chmod 600 ~/.ssh/authorized_keys";
+		const macRemote =
+			"mkdir -p ~/.ssh && chmod 700 ~/.ssh && tr -d '\\r' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys";
+		const pubWin = pubKeyPath.replace(/\//g, "\\");
+		const installCmds: string[] = IS_WIN
+			? [`scp "${pubWin}" ${user}@${host}:rl-pub.tmp`, `ssh ${user}@${host} "${winRemote}"`]
+			: [`cat ${pubKeyPath} | ssh ${user}@${host} "${macRemote}"`];
+		const installCmdText = installCmds.join("\n  ");
+		const pwTimes = IS_WIN ? "两条命令各输一次密码" : "输一次服务器密码";
 
 		lines.push("");
 		if (attempt > 1) {
-			lines.push(`第 ${attempt} 次仍连不上。若上面那条命令已跑过且没报错，`);
+			lines.push(`第 ${attempt} 次仍连不上。若上面的命令已跑过且没报错，`);
 			lines.push("多半不是公钥没装上，而是服务器端 ~/.ssh 权限不对。");
 		}
-		lines.push("还差一步：把公钥装到服务器（需要输一次服务器密码，之后永久免密）。");
-		lines.push("**另开一个终端**执行：");
-		lines.push(`  ${installCmd}`);
+		lines.push("还差一步：把公钥装到服务器（装完永久免密）。");
+		lines.push("**另开一个终端**逐条执行：");
+		for (const c of installCmds) lines.push(`  ${c}`);
 		if (IS_WIN) {
-			lines.push("  cmd.exe 和 PowerShell 都行（远端已用 tr -d '\\r' 吃掉 PowerShell 会带上的 CR）。");
+			lines.push("  cmd.exe 和 PowerShell 都可以（命令已实测兼容两种终端）。");
 		}
 		lines.push("");
 
@@ -284,7 +295,10 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		ui.status(undefined);
 		ui.say(lines.slice(saidUpTo).join("\n"));
 		saidUpTo = lines.length;
-		const ok = await ui.confirm("公钥装好了吗？", `另开终端执行：\n\n  ${installCmd}\n\n输一次服务器密码。执行完选 Yes 继续。`);
+		const ok = await ui.confirm(
+			"公钥装好了吗？",
+			`另开终端逐条执行：\n\n  ${installCmdText}\n\n${pwTimes}。执行完选 Yes 继续。`,
+		);
 		if (!ok) {
 			lines.push("已取消。随时重跑 /rl setup 继续（前面的步骤会自动跳过）。");
 			return { lines, done: false, needsAttention: false };
