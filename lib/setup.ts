@@ -281,9 +281,16 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 			}
 		}
 
+		// 远端用 `tr -d '\r'` 而不是 `cat`：
+		// PowerShell 里 type 是 Get-Content 的别名，管道到 ssh 这种**原生程序**时
+		// 会带 CRLF，那个 '\r' 留在公钥行尾，sshd 可能认不出来 → 装了照样要密码。
+		// tr -d '\r' 两种终端通吃，cmd 下也无害（公钥本身不含 CR）。
+		const remoteTail =
+			`mkdir -p ~/.ssh && chmod 700 ~/.ssh && ` +
+			`tr -d '\\r' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`;
 		const installCmd = IS_WIN
-			? `type "${pubKeyPath.replace(/\//g, "\\")}" | ssh ${user}@${host} "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"`
-			: `cat ${pubKeyPath} | ssh ${user}@${host} "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"`;
+			? `type "${pubKeyPath.replace(/\//g, "\\")}" | ssh ${user}@${host} "${remoteTail}"`
+			: `cat ${pubKeyPath} | ssh ${user}@${host} "${remoteTail}"`;
 
 		lines.push("");
 		if (attempt > 1) {
@@ -294,7 +301,7 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		lines.push("**另开一个终端**执行：");
 		lines.push(`  ${installCmd}`);
 		if (IS_WIN) {
-			lines.push("  ⚠ 在 **cmd.exe** 里执行 —— PowerShell 的 type 是另一个命令，行为不一样。");
+			lines.push("  cmd.exe 和 PowerShell 都行（远端已用 tr -d '\\r' 吃掉 PowerShell 会带上的 CR）。");
 		}
 		lines.push("");
 
