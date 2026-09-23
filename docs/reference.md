@@ -15,6 +15,7 @@
 | `/rl agents` | 已有 AGENTS.md 时让 agent 合并（去重 + 精简），背景放块外、规则逐字保留 |
 | `/rl doctor` | 环境体检（只读） |
 | `/rl setup` | 首次一站式：生成项目文件 + 配 ssh（需要 TUI 模式） |
+| `/rl help` | 显示所有命令的说明（`-h` / `--help` / `?` 同样有效） |
 
 ## 工具（agent 可调用）
 

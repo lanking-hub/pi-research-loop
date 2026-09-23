@@ -20,6 +20,7 @@
  *   /rl agents     项目里已有 AGENTS.md 时，让 agent 帮你合并（去重 + 精简），
  *                  背景提取自你的文档放在块外，规则块逐字保留
  *   /rl doctor     逐项实测环境，告诉你还差什么（只读体检）
+ *   /rl help       显示所有命令的说明
  *   /rl setup      首次一站式：生成项目文件（AGENTS.md / goal / notes / runs.txt）
  *                  + 交互式配 ssh（生成钥匙、写别名、登记指纹、传脚本、写配置）
  *                  唯一人工环节（装公钥）会在向导内暂停等你确认，不用重跑。
@@ -128,6 +129,30 @@ function statusText(): string {
 	return [
 		`循环：${isRunning() ? "运行中" : "已停止"}（每 ${cfg.pollIntervalSec}s 盯一次实验）`,
 		`实验：${lastStatus}`,
+	].join("\n");
+}
+
+function helpText(): string {
+	return [
+		"research-loop —— 自主科研迭代循环",
+		"",
+		"  /rl              开始循环（默认动作；已在跑则显示状态）",
+		"  /rl stop         停止循环",
+		"  /rl status       看状态：循环在不在跑 + 实验进展",
+		"  /rl goal <文本>   往 .auto/goal.md 加一条建议，下一轮 agent 自动读到",
+		"  /rl agents       项目里已有 AGENTS.md 时，让 agent 帮你合并（去重 + 精简）",
+		"  /rl doctor       环境体检（只读）：ssh、目录、脚本、项目文件",
+		"  /rl setup        首次一站式：生成项目文件 + 交互式配 ssh（需要 TUI 模式）",
+		"  /rl help         显示这个帮助",
+		"",
+		"首次流程：",
+		"  /rl setup  →  回答几个问题，自动配好 ssh",
+		"  /reload    →  让新生成的 AGENTS.md 生效",
+		"  /rl doctor →  体检，全绿再往下",
+		"  /rl        →  开始循环",
+		"",
+		"跑起来后不用管：有结果 / 崩溃 / 卡死 / 异常，会自动叫醒 agent 继续。",
+		"想改方向：改 .auto/goal.md，或 /rl goal <一句话>。",
 	].join("\n");
 }
 
@@ -686,7 +711,7 @@ function stopPolling(): void {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("rl", {
-		description: "research-loop：开始循环（默认） / stop / status / goal / agents / doctor / setup",
+		description: "research-loop：开始循环（默认） / stop / status / goal / agents / doctor / setup / help",
 		handler: async (args, ctx) => {
 			lastCtx = ctx;
 			cfg = loadConfig();
@@ -720,6 +745,11 @@ export default function (pi: ExtensionAPI) {
 					`循环已开始 — 我会盯着实验，一有结果就叫醒 agent 继续迭代你的方法。\n/rl stop 停止`,
 					"info",
 				);
+				return;
+			}
+
+			if (a === "help" || a === "-h" || a === "--help" || a === "?") {
+				notify(helpText(), "info");
 				return;
 			}
 
@@ -806,10 +836,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			notify(
-				"用法：/rl（开始循环） | /rl stop | /rl status | /rl goal <文本> | /rl agents | /rl doctor | /rl setup",
-				"warning",
-			);
+			notify(`不认识的参数：${a}\n\n${helpText()}`, "warning");
 		},
 	});
 

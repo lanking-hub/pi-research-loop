@@ -115,6 +115,7 @@ Then just tell the agent what to work on. It launches the first experiment, and 
 /rl agents        Merge into an existing AGENTS.md (dedupe + condense) — done by the agent
 /rl doctor        Environment check (read-only)
 /rl setup         First-time: generate project files + configure ssh (needs TUI mode)
+/rl help          Show this list
 ```
 
 ---
@@ -270,7 +271,7 @@ cd ~/research && pi
 
 - **table 模式唯一约定**：实验跑完在输出目录写 `DONE` 文件（内容随意，建议放指标）。怎么起实验不限——Slurm / Docker / conda / 裸机都行
 - **零配置、服务器零部署**
-- **命令**：`/rl`（开始）、`stop`、`status`、`goal <文本>`、`doctor`、`setup`
+- **命令**：`/rl`（开始）、`stop`、`status`、`goal <文本>`、`agents`、`doctor`、`setup`、`help`
 - **中途介入**：改 `.auto/goal.md`；打字 Enter = steer；Esc = 停
 
 详细说明见 [docs/reference.md](docs/reference.md)（完整清单）、[docs/setup-windows.md](docs/setup-windows.md)（Windows 上手）。
