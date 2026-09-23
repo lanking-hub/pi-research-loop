@@ -36,13 +36,9 @@ That's it. How you launch is entirely unconstrained — `nohup`, `sbatch`, `dock
 
 Alongside it, register the path so polling knows to look:
 
-Alongside it:
-
 - `track_run` tool — register an experiment path + PID in one call
 - **The PID is optional but strongly recommended**: with it, a crash is detected **immediately** (`kill -0`, one ssh); without it you wait for the timeout
 - Timeout fallback — if a registered run still has no `DONE` after `maxHours` (default 72h), you get reminded, so a forgotten `DONE` can't become permanent silence
-
-Switch with `"mode": "table"` or `"dir"`.
 
 ## Install
 

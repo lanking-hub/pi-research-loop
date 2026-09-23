@@ -50,19 +50,15 @@ research-loop-server
 
 项目级覆盖全局；**占位值（`TODO`）不会覆盖**上一层已填好的值，所以"只填一部分"是安全的。
 
-| 字段 | 默认值 | 说明 |  |
-|---|---|---|---|
-| `sshHost` | `research-loop-server` | ssh 别名 | 一般不用改 |
-| `mode` | `"table"` | table / dir | ✅ |
-| `runsFile` | `.auto/runs.csv` | 登记表路径 | ✅ |
-| `maxHours` | `72` | 超时兜底 | ✅ |
-| `pollIntervalSec` | `60` | 轮询间隔 | ✅ |
-| `mergeWindowSec` | `60` | 两次唤醒最小间隔 | ✅ |
-| `sshTimeoutSec` | `15` | 单次 ssh 超时 | ✅ |
-| `sshFailEscalate` | `3` | 失败几次才叫醒 LLM | ✅ |
-| `runsPath` | `TODO` | 固定 runs 目录 | ❌ dir 才用 |
-| `statusCommand` | `TODO` | 报状态的命令 | ❌ dir 才用 |
-| `startCommand` | `TODO` | 起实验的命令 | ❌ dir 才用 |
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `sshHost` | `research-loop-server` | ssh 别名，一般不用改 |
+| `runsFile` | `.auto/runs.csv` | 登记表路径 |
+| `maxHours` | `72` | 超时兜底 |
+| `pollIntervalSec` | `60` | 轮询间隔 |
+| `mergeWindowSec` | `60` | 两次唤醒最小间隔 |
+| `sshTimeoutSec` | `15` | 单次 ssh 超时 |
+| `sshFailEscalate` | `3` | ssh 连续失败几次才叫醒 LLM |
 
 ---
 
