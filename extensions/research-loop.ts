@@ -1,9 +1,13 @@
 /**
  * research-loop — 自主科研迭代循环的驱动器
  *
- * 只做两件事：
- *   1. 定时通过 ssh 轮询远程服务器上各个实验 run 的状态
- *   2. 有结果（完成 / 崩溃 / 卡死 / 未知）时唤醒 agent
+ * 目的：让 agent 持续迭代你的**方法和代码**。
+ * 实验只是验证手段；轮询只是为了让循环不停下来的触发器。
+ * agent 每轮真正的工作是「看结果 → 改方法/代码 → 起下一个实验验证」。
+ *
+ * 扩展只做两件事：
+ *   1. 定时问服务器：登记的实验有结果了吗
+ *   2. 有结果就唤醒 agent，让它继续迭代
  *
  * 它刻意不判定任何事：不认识指标、不做 keep/discard、不决定下一步做什么。
  * 领域规则全部在 AGENTS.md（见 templates/）里，由人维护。
@@ -97,15 +101,23 @@ function notify(msg: string, level: "info" | "warning" | "error" = "info"): void
 	}
 }
 
+/** status 分两行写清楚：上面是扩展自身，下面是实验。别混在一条字符串里。 */
+function statusText(): string {
+	return [
+		`循环：${polling ? "运行中" : "已停止"}（每 ${cfg.pollIntervalSec}s 盯一次实验）`,
+		`实验：${lastStatus}`,
+	].join("\n");
+}
+
 function buildWakeMessage(batch: PendingItem[]): string {
-	const lines: string[] = ["有实验状态变化，请处理。", ""];
+	const lines: string[] = ["上一轮的实验有结果了，继续推进。", ""];
 	for (const item of batch) lines.push(...item.lines);
 	lines.push("");
-	lines.push("然后：");
-	lines.push("1. 按 AGENTS.md 更新 .auto/notes.md（每轮重写，含死胡同）");
-	lines.push("2. 用 gpu_status 查实时空闲卡，按 .auto/goal.md 决定下一步");
-	lines.push("3. 处理完的实验，把它从 .auto/runs.txt 里删掉");
-	lines.push("4. 起新实验时记得调 track_run 登记");
+	lines.push("接下来这一轮：");
+	lines.push("1. 看结果（DONE / 日志），判断这次改动值不值");
+	lines.push("2. 按 AGENTS.md 更新 .auto/notes.md（每轮重写，含死胡同）");
+	lines.push("3. 改方法 / 改代码 —— 这是重点，实验只是验证手段");
+	lines.push("4. 起下一个实验验证，并用 track_run 登记（处理完的先从 .auto/runs.txt 删掉）");
 	return lines.join("\n");
 }
 
@@ -582,7 +594,7 @@ export default function (pi: ExtensionAPI) {
 			// 默认动作 = 开始循环（最常做的那件事）
 			if (!a || a === "start" || a === "on") {
 				if (polling) {
-					notify(`循环运行中 — ${lastStatus}（每 ${cfg.pollIntervalSec}s 盯一次）`, "info");
+					notify(statusText(), "info");
 					return;
 				}
 				if (!isConfigured(cfg)) {
@@ -595,7 +607,10 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				await startPolling(pi);
-				notify(`循环已开始 — 每 ${cfg.pollIntervalSec}s 盯一次实验，有结果就叫醒 agent。/rl stop 停止`, "info");
+				notify(
+					`循环已开始 — 我会盯着实验，一有结果就叫醒 agent 继续迭代你的方法。\n/rl stop 停止`,
+					"info",
+				);
 				return;
 			}
 
@@ -606,7 +621,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (a === "status") {
-				notify(`${polling ? "循环运行中" : "已停止"} — ${lastStatus}（每 ${cfg.pollIntervalSec}s 盯一次）`, "info");
+				notify(statusText(), "info");
 				return;
 			}
 
