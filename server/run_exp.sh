@@ -84,7 +84,9 @@ echo "$PROJECT_DIR" >"$dir/project.txt"
 (
 	cd "$PROJECT_DIR" || exit 1
 	export CUDA_VISIBLE_DEVICES="$gpu"
-	eval "$cmd" >>"$dir/log.txt" 2>&1
+	# 包一层子 shell：命令里若有 exit（比如 "python x || exit 1"），
+	# eval 直接跑会连本 subshell 一起退出，DONE 就写不出来了
+	( eval "$cmd" ) >>"$dir/log.txt" 2>&1
 	code=$?
 	{
 		echo "exit_code=$code"
