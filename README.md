@@ -33,7 +33,7 @@ The extension knows nothing about your metrics. It does not keep/discard, and do
 | | **table mode** (default, for iteration) | **dir mode** (for baselines) |
 |---|---|---|
 | How experiments launch | **Up to you / the agent** — `nohup`, `sbatch`, `docker`, `conda` | Fixed `run_exp.sh` |
-| What the extension watches | Paths registered in `.auto/runs.txt`, checking for `DONE` | A fixed runs dir + server scripts reporting state |
+| What the extension watches | Paths registered in `.auto/runs.csv`, checking for `DONE` | A fixed runs dir + server scripts reporting state |
 | Deploy scripts to the server? | **No** | Yes, `server/*.sh` |
 | Required config | **None (zero-config)** | `sshHost` + `runsPath` + `statusCommand` |
 | Best for | Open-ended method iteration | Fixed, repetitive batch runs |
@@ -78,7 +78,7 @@ It first generates project files:
 | `AGENTS.md` | Agent rules. If you already have one, it is **not appended blindly** — run `/rl agents` to let the agent merge it |
 | `.auto/goal.md` | **You write**: method, goal, which metrics matter, rough direction |
 | `.auto/notes.md` | Agent writes: progress, dead ends (rewritten each turn) |
-| `.auto/runs.txt` | Running experiments (agent adds/removes) |
+| `.auto/runs.csv` | Running experiments (agent adds/removes) |
 
 Then it configures ssh, asking only two things: **server address** and **username**.
 
@@ -223,7 +223,7 @@ your project dir
 ├─ .auto/
 │   ├─ goal.md                you write: direction, metrics, concurrency limit
 │   ├─ notes.md               agent writes: progress, dead ends
-│   └─ runs.txt               running experiments (agent maintains)
+│   └─ runs.csv               running experiments (agent maintains)
 └─ .pi/
     └─ runs-state.json        extension's own bookkeeping — ignore it
 ```

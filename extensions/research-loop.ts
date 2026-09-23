@@ -21,7 +21,7 @@
  *                  背景提取自你的文档放在块外，规则块逐字保留
  *   /rl doctor     逐项实测环境，告诉你还差什么（只读体检）
  *   /rl help       显示所有命令的说明
- *   /rl setup      首次一站式：生成项目文件（AGENTS.md / goal / notes / runs.txt）
+ *   /rl setup      首次一站式：生成项目文件（AGENTS.md / goal / notes / runs.csv）
  *                  + 交互式配 ssh（生成钥匙、写别名、登记指纹、传脚本、写配置）
  *                  唯一人工环节（装公钥）会在向导内暂停等你确认，不用重跑。
  *                  每步幂等，半途失败后重跑是安全的。
@@ -203,13 +203,25 @@ function handleSshFailure(pi: ExtensionAPI, res: { err: string; out: string }): 
 	}
 }
 
-/** 待检查表里的一行：路径 + 可选的服务器进程号 */
+/**
+ * 待检查表里的一行。
+ *
+ * track / note 是**给 agent 看的标签**，扩展只透传、不解析语义——
+ * 它不知道 "iter" 和 "baseline" 是什么，只是把字符串搬进唤醒消息。
+ */
 interface TableEntry {
 	path: string;
 	pid?: string;
+	track?: string;
+	note?: string;
 }
 
-/** agent 维护的待检查表：一行一个服务器绝对路径，空格/Tab 后可跟 pid */
+/** 按扩展名决定解析方式：.csv 走 CSV，其余走「空白分隔 + 行尾 pid」（向后兼容） */
+function isCsvTable(): boolean {
+	return /\.csv$/i.test(cfg.runsFile);
+}
+
+/** agent 维护的待检查表：过滤空行和 # 注释 */
 function readRunsTable(): string[] {
 	const file = join(process.cwd(), cfg.runsFile);
 	if (!existsSync(file)) return [];
@@ -219,16 +231,65 @@ function readRunsTable(): string[] {
 		.filter((l) => l && !l.startsWith("#"));
 }
 
+/** 唤醒消息里怎么称呼这个 run：有 track/note 就带上，唤醒后一眼知道该读哪个 goal */
+function describe(e: TableEntry): string {
+	const tag = [e.track, e.note].filter(Boolean).join(" / ");
+	return tag ? `${e.path}  [${tag}]` : e.path;
+}
+
+/** 最小可用的 CSV 切分：支持双引号包裹和 "" 转义，够用且不引依赖 */
+function splitCsv(line: string): string[] {
+	const out: string[] = [];
+	let cur = "";
+	let quoted = false;
+	for (let i = 0; i < line.length; i++) {
+		const c = line[i];
+		if (quoted) {
+			if (c !== '"') cur += c;
+			else if (line[i + 1] === '"') {
+				cur += '"';
+				i++;
+			} else quoted = false;
+		} else if (c === '"') quoted = true;
+		else if (c === ",") {
+			out.push(cur);
+			cur = "";
+		} else cur += c;
+	}
+	out.push(cur);
+	return out.map((s) => s.trim());
+}
+
+function csvCell(v: string): string {
+	return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+
+/** CSV 一行：path,pid,track,note —— 后三列都可空 */
+function parseCsvLine(line: string): TableEntry {
+	const c = splitCsv(line);
+	const path = c[0] ?? "";
+	if (!path) return { path: "" };
+	const pid = /^\d+$/.test(c[1] ?? "") ? c[1] : undefined;
+	return { path, pid, track: c[2] || undefined, note: c[3] || undefined };
+}
+
+/** 旧格式一行：路径 + 可选 pid（最后一个纯数字 token） */
+function parseTxtLine(line: string): TableEntry {
+	const parts = line.split(/\s+/);
+	// 最后一个 token 是纯数字 → 当成 pid（这样路径里带空格也不会被拆坏）
+	if (parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1] ?? "")) {
+		const pid = parts.pop();
+		return { path: parts.join(" "), pid };
+	}
+	return { path: line };
+}
+
 function parseTableEntries(): TableEntry[] {
-	return readRunsTable().map((line) => {
-		const parts = line.split(/\s+/);
-		// 最后一个 token 是纯数字 → 当成 pid（这样路径里带空格也不会被拆坏）
-		if (parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1] ?? "")) {
-			const pid = parts.pop();
-			return { path: parts.join(" "), pid };
-		}
-		return { path: line };
-	});
+	const lines = readRunsTable();
+	const parsed = isCsvTable()
+		? lines.filter((l) => !/^path\s*,/i.test(l)).map(parseCsvLine) // 跳过表头
+		: lines.map(parseTxtLine);
+	return parsed.filter((e) => e.path);
 }
 
 type TableState = "DONE" | "RUNNING" | "CRASHED" | "NOPID" | "UNKNOWN";
@@ -281,7 +342,7 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 		sshFailCount = 0;
 
 		if (st === "DONE") {
-			enqueue({ key: e.path, lines: [`- 完成：${e.path}`, `  读 ${e.path}/DONE 看结果。`] });
+			enqueue({ key: e.path, lines: [`- 完成：${describe(e)}`, `  读 ${e.path}/DONE 看结果。`] });
 			continue;
 		}
 
@@ -289,7 +350,7 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 			enqueue({
 				key: e.path,
 				lines: [
-					`- 崩溃：${e.path}`,
+					`- 崩溃：${describe(e)}`,
 					`  进程 ${e.pid} 已不存在，且没有 DONE。`,
 					`  去读它的日志定位原因，然后把这行从 ${cfg.runsFile} 删掉。`,
 				],
@@ -304,7 +365,7 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 			enqueue({
 				key: e.path,
 				lines: [
-					`- 超时：${e.path}`,
+					`- 超时：${describe(e)}`,
 					`  登记已 ${Math.round(hours)} 小时，仍没有 DONE。`,
 					st === "NOPID"
 						? `  没登记 pid，无法判断进程是否还活着。去查：崩了、卡了，还是忘了写 DONE？`
@@ -605,7 +666,7 @@ function ensureProjectFiles(): string[] {
 		{ from: "goal.md", to: join(".auto", "goal.md"), hint: "你写方向" },
 		{ from: "notes.md", to: join(".auto", "notes.md"), hint: "当前状态 + 死胡同（每轮重写，精简）" },
 		{ from: "tree.md", to: join(".auto", "tree.md"), hint: "完整尝试树（累积，按需读）" },
-		{ from: "runs.txt", to: join(".auto", "runs.txt"), hint: "正在跑的实验（agent 增删）" },
+		{ from: "runs.csv", to: join(".auto", "runs.csv"), hint: "正在跑的实验（agent 增删）" },
 		// 注意：不生成 research-loop.json。table 模式零配置就能跑，
 		// 想调参的人自己建（字段见 docs/reference.md）。
 	];
@@ -849,7 +910,8 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"起完实验必须调 track_run 登记路径，否则扩展不会盯它，实验会静默失联",
 			"必须保证实验结束时会在该路径下写 DONE 文件（改训练代码，或命令末尾 touch）",
-			"实验处理完把它从 .auto/runs.txt 里删掉",
+			"实验处理完把它从 .auto/runs.csv 里删掉",
+			"track / note 强烈建议填：唤醒消息会原样带上，你一眼就知道这是哪个工作流、在试什么",
 		],
 		parameters: Type.Object({
 			path: Type.String({ description: "服务器上该实验输出目录的绝对路径" }),
@@ -857,6 +919,17 @@ export default function (pi: ExtensionAPI) {
 				Type.String({
 					description:
 						"服务器上该实验的进程号。强烈建议填（nohup 起的话就是 echo $! 的值）——填了才能在崩溃时立刻发现，而不是等超时。Slurm/Docker 场景填不了就省略。",
+				}),
+			),
+			track: Type.Optional(
+				Type.String({
+					description:
+						"这条属于哪个工作流，例如 iter / baseline。扩展**不解析**它的含义，只原样带进唤醒消息。",
+				}),
+			),
+			note: Type.Optional(
+				Type.String({
+					description: "一句话说明在试什么，例如「methodA / SYSU / seed0」。同样只透传，不解析。",
 				}),
 			),
 		}),
@@ -875,13 +948,26 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `pid 必须是数字（当前是 ${rawPid}）` }], details: { ok: false } };
 			}
 
-			const line = rawPid ? `${p}\t${rawPid}` : p;
+			const track = params.track?.trim() || undefined;
+			const note = params.note?.trim() || undefined;
+
 			const file = join(process.cwd(), cfg.runsFile);
 			try {
 				mkdirSync(dirname(file), { recursive: true });
 				const existing = parseTableEntries();
 				if (!existing.some((e) => e.path === p)) {
-					appendFileSync(file, `${line}\n`);
+					let chunk = "";
+					if (isCsvTable()) {
+						// 文件还不存在就先写表头
+						if (!existsSync(file)) chunk += "path,pid,track,note\n";
+						chunk +=
+							[csvCell(p), rawPid ?? "", csvCell(track ?? ""), csvCell(note ?? "")].join(",") + "\n";
+					} else {
+						// 旧格式放不下额外列，写成注释行放在 run 行上方（解析时会忽略）
+						if (track || note) chunk += `# ${[track, note].filter(Boolean).join(" / ")}\n`;
+						chunk += `${rawPid ? `${p}\t${rawPid}` : p}\n`;
+					}
+					appendFileSync(file, chunk);
 				} else {
 					return {
 						content: [{ type: "text", text: `已在盯：${p}` }],

@@ -53,7 +53,7 @@ table 模式**零配置就能跑**。只有想调参时才建：
 |---|---|---|---|
 | `sshHost` | `research-loop-server` | ssh 别名 | 一般不用改 |
 | `mode` | `"table"` | table / dir | ✅ |
-| `runsFile` | `.auto/runs.txt` | 登记表路径 | ✅ |
+| `runsFile` | `.auto/runs.csv` | 登记表路径 | ✅ |
 | `maxHours` | `72` | 超时兜底 | ✅ |
 | `pollIntervalSec` | `60` | 轮询间隔 | ✅ |
 | `mergeWindowSec` | `60` | 两次唤醒最小间隔 | ✅ |
@@ -65,6 +65,44 @@ table 模式**零配置就能跑**。只有想调参时才建：
 
 ---
 
+## 登记表 `.auto/runs.csv`
+
+一行一个正在跑的实验。起完实验调 `track_run` 登记，处理完把那行删掉。
+
+```csv
+path,pid,track,note
+/data/proj/iter/outputs/exp12,88321,iter,试 CBAM 注意力
+/data/proj/baselines/methodA/out,88231,baseline,methodA / SYSU / seed0
+```
+
+| 列 | 必填 | 扩展怎么用 |
+|---|---|---|
+| `path` | ✅ | 盯这个目录下有没有 `DONE` |
+| `pid` | 可选 | 判崩溃。不填就只能等 `maxHours` 超时 |
+| `track` | 可选 | **只透传**，原样进唤醒消息 |
+| `note` | 可选 | **只透传**，原样进唤醒消息 |
+
+**`track` / `note` 扩展不解析含义**——它不知道 `iter` 和 `baseline` 是什么，只是把字符串搬进唤醒消息。作用只有一个：你被唤醒时一眼知道该读哪个 `goal`。
+
+### 格式怎么定的
+
+按 `runsFile` 的**扩展名**自动切换解析器，向后兼容：
+
+| 文件 | 解析方式 |
+|---|---|
+| `*.csv` | CSV，`path,pid,track,note` 四列，跳过表头和 `#` 注释 |
+| 其他 | 旧格式：空白分隔 + 行尾纯数字当 pid，`#` 开头是注释 |
+
+想继续用旧格式就在配置里写 `"runsFile": ".auto/runs.txt"`，行为完全不变。
+
+### 多个工作流怎么共存
+
+一份表就行，不要拆成多份——拆了就要跑多个循环（= 多个 pi 实例），它们互相看不见，会抢同一批卡。
+
+用 `track` 列区分工作流，用 `note` 写清楚在试什么。`goal` 可以按工作流分开放在各自的子目录里。
+
+---
+
 ## `/rl setup` 流程
 
 ```
@@ -72,7 +110,7 @@ A. 生成项目文件（静默）
    AGENTS.md      没有→创建；有→末尾追加标记块；已有块→原地更新
    .auto/goal.md  不存在才创建
    .auto/notes.md 不存在才创建
-   .auto/runs.txt 不存在才创建
+   .auto/runs.csv 不存在才创建
    （不生成任何配置文件）
 
 B. ssh 向导
@@ -105,7 +143,7 @@ server/test.sh                上面两个的回归测试
 templates/AGENTS.research.md  agent 规则 ← 最关键（含 {{SSH_ALIAS}} 占位符）
 templates/goal.md             方向模板
 templates/notes.md            进度模板
-templates/runs.txt            登记表模板
+templates/runs.csv            登记表模板
 docs/internals.md             机制与坑
 docs/setup-windows.md         Windows 上手清单
 docs/reference.md             本页
@@ -124,7 +162,7 @@ README.md LICENSE .gitignore package.json
 ├─ .auto/
 │   ├─ goal.md                你写：方向、指标、并发上限
 │   ├─ notes.md               agent 写：进度、死胡同（每轮重写）
-│   └─ runs.txt               正在跑的实验（路径 + 可选 pid）← agent 增删
+│   └─ runs.csv               正在跑的实验（路径 + 可选 pid）← agent 增删
 └─ .pi/
     └─ runs-state.json        扩展自己记的（登记时间、已报过）← 不用管
 

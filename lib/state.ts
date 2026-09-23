@@ -5,7 +5,7 @@ import { join } from "node:path";
  * 扩展自己维护的观察状态。
  *
  * 关键分工：
- *   .auto/runs.txt        ← **agent 拥有**（它增删正在跑的实验路径）
+ *   .auto/runs.csv        ← **agent 拥有**（它增删正在跑的实验路径）
  *   .pi/runs-state.json   ← **扩展拥有**（记录每个路径第一次被看到的时间、已报过哪些）
  *
  * 两边不写同一个文件，避免互相覆盖。

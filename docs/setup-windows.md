@@ -45,7 +45,7 @@ pi
 AGENTS.md              agent 规则（已有就在末尾追加一块）
 .auto/goal.md          你写方向
 .auto/notes.md         agent 写进度
-.auto/runs.txt         正在跑的实验
+.auto/runs.csv         正在跑的实验
 ```
 
 **不需要配置文件。**

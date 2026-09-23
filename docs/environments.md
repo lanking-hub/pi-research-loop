@@ -66,7 +66,7 @@ Two rules:
    ```
 2. **Leave the PID empty.** A Slurm job id is not a PID, and the job runs on a compute node — `kill -0` from the login node is meaningless. Without a PID you rely on `DONE` + the timeout fallback, so consider setting `maxHours` close to your real job duration.
 
-Optional: register the job id anyway in `runs.txt` as a comment so you can find it later.
+Optional: register the job id anyway in `runs.csv` as a comment so you can find it later.
 
 ### Docker / Singularity
 
@@ -91,7 +91,7 @@ Almost always one of these:
 
 | Cause | Check |
 |---|---|
-| Never registered | Is the path in `.auto/runs.txt`? `/rl status` shows the count |
+| Never registered | Is the path in `.auto/runs.csv`? `/rl status` shows the count |
 | `DONE` not written | `ssh research-loop-server "ls -la <path>"` |
 | Wrong path registered | Must be the **absolute** path on the server |
 | Registered but stale | The run was already reported once; it won't be announced again |
@@ -103,7 +103,7 @@ Symptom: no errors, no wake-ups, nothing moves.
 
 1. `/rl doctor` — it checks ssh connectivity and the table
 2. `ssh research-loop-server "echo ok"` by hand — should return `ok` with no password prompt
-3. Check `.auto/runs.txt` actually has lines (not just comments)
+3. Check `.auto/runs.csv` actually has lines (not just comments)
 
 ### ssh problems
 
@@ -126,11 +126,11 @@ Symptom: no errors, no wake-ups, nothing moves.
 
 ### Timeout fired and the experiment really did die
 
-That's the fallback doing its job. Read the log, fix it, remove the line from `.auto/runs.txt`, relaunch.
+That's the fallback doing its job. Read the log, fix it, remove the line from `.auto/runs.csv`, relaunch.
 
 ### A finished run keeps being polled
 
-Remove its line from `.auto/runs.txt`. The extension forgets paths that are no longer listed.
+Remove its line from `.auto/runs.csv`. The extension forgets paths that are no longer listed.
 
 ### Alias conflict
 

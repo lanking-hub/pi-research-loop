@@ -53,7 +53,7 @@ export interface Config {
 
 export const DEFAULTS: Config = {
 	mode: "table",
-	runsFile: ".auto/runs.txt",
+	runsFile: ".auto/runs.csv",
 	maxHours: 72,
 	sshHost: SSH_ALIAS,
 	runsPath: PLACEHOLDER,
