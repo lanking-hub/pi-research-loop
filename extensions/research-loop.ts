@@ -36,7 +36,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { isConfigured, loadConfig, PLACEHOLDER, type Config } from "../lib/config.ts";
 import { templatesDir } from "../lib/paths.ts";
-import { runSsh } from "../lib/ssh.ts";
+import { expandRemotePath, remoteHome, runSsh } from "../lib/ssh.ts";
 import { runSetup } from "../lib/setup.ts";
 
 type RunState = "RUNNING" | "DONE" | "CRASHED" | "STALLED" | "UNKNOWN";
@@ -217,17 +217,21 @@ async function doctor(): Promise<void> {
 			lines.push("  检查：~/.ssh/config 有这个 Host 吗？配了免密 key 吗？");
 		}
 
+		// ~/ 在带引号的命令里不会被 shell 展开，先自己展开再查
+		const home = await remoteHome(cfg.sshHost, cfg.sshTimeoutSec);
+		const runsAbs = expandRemotePath(cfg.runsPath, home);
 		const dir = await runSsh(
 			cfg.sshHost,
-			`test -d ${JSON.stringify(cfg.runsPath)} && echo yes || echo no`,
+			`test -d ${JSON.stringify(runsAbs)} && echo yes || echo no`,
 			cfg.sshTimeoutSec,
 		);
 		if (dir.out.trim() === "yes") {
-			lines.push(`✓ runs 目录存在：${cfg.runsPath}`);
+			lines.push(`✓ runs 目录存在：${runsAbs}`);
 		} else {
 			problems += 1;
-			lines.push(`✗ runs 目录不存在：${cfg.runsPath}`);
-			lines.push(`  服务器上先 mkdir -p ${cfg.runsPath}`);
+			lines.push(`✗ runs 目录不存在：${runsAbs}`);
+			lines.push(`  服务器上先 mkdir -p ${runsAbs}`);
+			lines.push(`  （配置里写的是 ${cfg.runsPath}；带引号时 ~ 不会展开，建议直接写绝对路径）`);
 		}
 
 		const st = await runSsh(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);

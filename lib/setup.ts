@@ -20,7 +20,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_NAME, loadConfig, type Config } from "./config.ts";
 import { serverDir } from "./paths.ts";
-import { runSsh, sshBin } from "./ssh.ts";
+import { expandRemotePath, remoteHome, runSsh, sshBin } from "./ssh.ts";
 
 const IS_WIN = process.platform === "win32";
 const scpBin = IS_WIN ? "scp.exe" : "scp";
@@ -252,9 +252,12 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		if (uploaded > 0) lines.push(`✓ 管理脚本已上传并赋执行权限（${REMOTE_BIN}/，共 ${uploaded} 个）`);
 	}
 
-	// ── 7. 问路径 ──────────────────────────────────────────
+	// ── 7. 问路径（~/ 会展开成服务器上的绝对路径再落盘）──────
+	const home = await remoteHome(alias, 10);
 	const runsDefault = cfg.runsPath !== "TODO" ? cfg.runsPath : DEFAULT_RUNS;
-	const runsPath = (await ui.ask("服务器上 runs 目录路径（放实验结果）", runsDefault))?.trim() || runsDefault;
+	const runsRaw = (await ui.ask("服务器上 runs 目录路径（放实验结果）", runsDefault))?.trim() || runsDefault;
+	const runsPath = expandRemotePath(runsRaw, home);
+	if (runsPath !== runsRaw) lines.push(`  （${runsRaw} → ${runsPath}）`);
 
 	const mk = await runSsh(alias, `mkdir -p ${JSON.stringify(runsPath)} && echo ok`, 10);
 	if (mk.ok) {
@@ -265,11 +268,14 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		lines.push(`✗ 建 runs 目录失败：${runsPath}`);
 	}
 
-	const projectPath = (await ui.ask("服务器上项目目录路径（跑实验的地方）"))?.trim();
+	const projectRaw = (await ui.ask("服务器上项目目录路径（跑实验的地方）"))?.trim();
+	const projectPath = projectRaw ? expandRemotePath(projectRaw, home) : undefined;
 	if (!projectPath) {
 		problems += 1;
 		attention = true;
 		lines.push("✗ 未提供项目路径，startCommand 无法生成（重跑 /rl setup 补上即可）");
+	} else if (projectPath !== projectRaw) {
+		lines.push(`  （${projectRaw} → ${projectPath}）`);
 	}
 
 	// ── 8. 自动写配置 ──────────────────────────────────────
