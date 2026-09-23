@@ -16,6 +16,7 @@
     "lib",
     "server",
     "templates",
+    ".npmrc",
     "README.md",
     "LICENSE"
   ]
