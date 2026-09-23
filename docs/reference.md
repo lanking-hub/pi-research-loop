@@ -20,10 +20,10 @@
 
 ## 工具（agent 可调用）
 
-| 工具 | 干什么 | table 模式 |
-|---|---|---|
-| `track_run` | 登记实验路径 + 可选 pid | ✅ 用 |
-| `start_run` | 起实验（**dir 模式**） | ❌ 用不到 |
+只有一个：`track_run` —— 登记实验路径 + 可选 pid + 可选 `track` / `note` 标签。
+
+起实验**不走工具**：怎么起是 agent 自己的事（nohup / sbatch / docker / conda 都行），
+扩展完全不关心，也不提供相关工具。
 
 ## 监听的事件
 
@@ -43,14 +43,14 @@ research-loop-server
 
 ## 配置文件：**可选，默认不需要**
 
-table 模式**零配置就能跑**。只有想调参时才建：
+**零配置就能跑**。只有想调参时才建：
 
 - `<项目>/.pi/research-loop.json`（项目级）
 - `~/.pi/agent/research-loop.json`（全局）
 
 项目级覆盖全局；**占位值（`TODO`）不会覆盖**上一层已填好的值，所以"只填一部分"是安全的。
 
-| 字段 | 默认值 | 说明 | table 模式 |
+| 字段 | 默认值 | 说明 |  |
 |---|---|---|---|
 | `sshHost` | `research-loop-server` | ssh 别名 | 一般不用改 |
 | `mode` | `"table"` | table / dir | ✅ |
@@ -132,8 +132,7 @@ B. ssh 向导
    6  ssh-keyscan 登记指纹
    7  试连；失败→打印装公钥命令→原地等你（最多 3 轮）  ← 唯一手动
    8  修服务器端 ~/.ssh 权限
-   9  table 模式到此结束
-   （dir 模式才继续：建 ~/bin、传脚本、问路径、写配置）
+   9  到此结束（不传任何脚本、不写任何配置文件）
 ```
 
 ---
@@ -145,11 +144,8 @@ extensions/research-loop.ts   主扩展：命令 + 工具 + 轮询
 lib/config.ts                 配置（含固定别名常量 SSH_ALIAS）
 lib/ssh.ts                    runSsh ← 唯一的远程执行入口
 lib/state.ts                  登记时间 / 已报过（落盘）
-lib/paths.ts                  定位包内 templates/ server/
+lib/paths.ts                  定位包内 templates/
 lib/setup.ts                  /rl setup 交互式向导
-server/run_exp.sh             起实验（dir 模式）
-server/run_status.sh          报状态（dir 模式）
-server/test.sh                上面两个的回归测试
 templates/AGENTS.research.md  agent 规则 ← 最关键（含 {{SSH_ALIAS}} 占位符）
 templates/goal.md             方向模板
 templates/notes.md            进度模板
@@ -160,7 +156,7 @@ docs/reference.md             本页
 README.md LICENSE .gitignore package.json
 ```
 
-**table 模式下 `server/` 三个文件完全用不到。**
+**没有需要部署到服务器上的东西**——扩展只 ssh 上去执行一句 `test -f <路径>/DONE`。
 
 ---
 

@@ -14,7 +14,6 @@
   "files": [
     "extensions",
     "lib",
-    "server",
     "templates",
     ".npmrc",
     "README.md",

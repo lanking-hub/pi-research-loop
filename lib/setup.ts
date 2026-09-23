@@ -2,7 +2,7 @@
  * /rl setup —— 交互式一键整备向导。
  *
  * 设计原则：
- *   - **问得越少越好**：table 模式只问「服务器地址」和「用户名」两件事。
+ *   - **问得越少越好**：只问「服务器地址」和「用户名」两件事。
  *     ssh 别名是固定常量（内部细节），不暴露给用户。
  *   - **一次跑完**：需要人动手的环节（装公钥）在向导内部暂停等待确认，
  *     不要求用户「跑两遍」。
@@ -18,17 +18,13 @@ import { execFile } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { CONFIG_NAME, loadConfig, SSH_ALIAS, type Config } from "./config.ts";
-import { serverDir } from "./paths.ts";
-import { expandRemotePath, isLocal, remoteHome, runLocal, runRemote, sshBin } from "./ssh.ts";
+import { loadConfig, SSH_ALIAS } from "./config.ts";
+import { isLocal, runLocal, runRemote, sshBin } from "./ssh.ts";
 
 const IS_WIN = process.platform === "win32";
-const scpBin = IS_WIN ? "scp.exe" : "scp";
 const keyscanBin = IS_WIN ? "ssh-keyscan.exe" : "ssh-keyscan";
 const keygenBin = IS_WIN ? "ssh-keygen.exe" : "ssh-keygen";
 
-const DEFAULT_RUNS = "~/runs";
-const REMOTE_BIN = "~/bin";
 const MAX_KEY_ATTEMPTS = 3;
 
 /** 交互能力的最小接口——lib 不依赖 pi 的类型，方便单独测试 */
@@ -117,28 +113,6 @@ function findAliasBlock(alias: string): { exists: boolean; hostName?: string } {
 		if (inBlock && /^HostName\s+/i.test(line)) hostName = line.slice(9).trim();
 	}
 	return { exists: seen, hostName };
-}
-
-function projectConfigPath(): string {
-	return join(process.cwd(), ".pi", CONFIG_NAME);
-}
-
-/** 写项目级配置，合并而非覆盖（只有 dir 模式用得上） */
-function writeProjectConfig(patch: Partial<Config>, lines: string[]): void {
-	const p = projectConfigPath();
-	let current: Record<string, unknown> = {};
-	try {
-		if (existsSync(p)) current = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
-	} catch {
-		current = {};
-	}
-	try {
-		mkdirSync(join(process.cwd(), ".pi"), { recursive: true });
-		writeFileSync(p, `${JSON.stringify({ ...current, ...patch }, null, 2)}\n`);
-		lines.push(`✓ 配置已写入 ${join(".pi", CONFIG_NAME)}`);
-	} catch (e) {
-		lines.push(`✗ 写配置失败：${e instanceof Error ? e.message : String(e)}`);
-	}
 }
 
 export async function runSetup(ui: SetupUI): Promise<SetupReport> {
@@ -332,90 +306,14 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	ui.status(undefined);
 	lines.push("✓ 服务器端 ssh 权限已确认（700/600）");
 
-	// ── 6. table 模式到此为止 ──────────────────────────────
-	// table 模式不需要传脚本、不需要固定 runs 目录、不需要配置文件——
-	// 那些都是 dir 模式（baseline 流程）才要的。
-	if (cfg.mode !== "dir") {
-		if (IS_WIN) {
-			lines.push("");
-			lines.push(`⚠ Windows：连服务器一律用别名走原生 ssh（ssh ${alias} "命令"）。`);
-			lines.push("  不要用 wsl ssh（WSL 是另一套没配置的环境，会卡在指纹确认/缺钥匙）。");
-		}
-		lines.push("");
-		lines.push("配置完成，不需要任何配置文件。");
-		lines.push("下一步：/reload，然后 /rl 开始循环。");
-		return { lines, done: problems === 0, needsAttention: attention };
-	}
-
-	// ── 以下只有 dir 模式才会走到 ──────────────────────────
-	const binDir = await runRemote(alias, `mkdir -p ${REMOTE_BIN} && echo ok`, 10);
-	if (!binDir.ok) {
-		problems += 1;
-		attention = true;
-		lines.push(`✗ 服务器上建 ${REMOTE_BIN} 失败`);
-	} else {
-		let uploaded = 0;
-		for (const script of ["run_status.sh", "run_exp.sh"]) {
-			const src = join(serverDir(), script);
-			if (!existsSync(src)) {
-				lines.push(`-- 本地找不到 ${script}，跳过上传`);
-				continue;
-			}
-			const up = await exec(scpBin, [src, `${alias}:bin/${script}`], 60000);
-			if (up.ok) {
-				await runRemote(alias, `chmod +x ${REMOTE_BIN}/${script}`, 10);
-				uploaded += 1;
-			} else {
-				problems += 1;
-				lines.push(`✗ 上传 ${script} 失败：${(up.err || up.out).trim().slice(0, 150)}`);
-			}
-		}
-		if (uploaded > 0) lines.push(`✓ 管理脚本已上传并赋执行权限（${REMOTE_BIN}/，共 ${uploaded} 个）`);
-	}
-
-	const home = await remoteHome(alias, 10);
-	const runsDefault = cfg.runsPath !== "TODO" ? cfg.runsPath : DEFAULT_RUNS;
-	const runsRaw = (await ui.ask("服务器上 runs 目录路径（放实验结果）", runsDefault))?.trim() || runsDefault;
-	const runsPath = expandRemotePath(runsRaw, home);
-	if (runsPath !== runsRaw) lines.push(`  （${runsRaw} → ${runsPath}）`);
-
-	const mk = await runRemote(alias, `mkdir -p ${JSON.stringify(runsPath)} && echo ok`, 10);
-	if (mk.ok) {
-		lines.push(`✓ runs 目录就绪：${runsPath}`);
-	} else {
-		problems += 1;
-		attention = true;
-		lines.push(`✗ 建 runs 目录失败：${runsPath}`);
-	}
-
-	const projectRaw = (await ui.ask("服务器上项目目录路径（跑实验的地方）"))?.trim();
-	const projectPath = projectRaw ? expandRemotePath(projectRaw, home) : undefined;
-	if (!projectPath) {
-		problems += 1;
-		attention = true;
-		lines.push("✗ 未提供项目路径，startCommand 无法生成（重跑 /rl setup 补上即可）");
-	} else if (projectPath !== projectRaw) {
-		lines.push(`  （${projectRaw} → ${projectPath}）`);
-	}
-
-	const patch: Partial<Config> = {
-		sshHost: alias,
-		runsPath,
-		// 路径加引号：不加的话路径里含空格会被 shell 拆成两段
-		statusCommand: `RUNS_DIR="${runsPath}" ${REMOTE_BIN}/run_status.sh`,
-	};
-	if (projectPath) {
-		patch.startCommand = `RUNS_DIR="${runsPath}" PROJECT_DIR="${projectPath}" ${REMOTE_BIN}/run_exp.sh`;
-	}
-	writeProjectConfig(patch, lines);
-
+	// ── 6. 收尾 ────────────────────────────────────────────
 	if (IS_WIN) {
 		lines.push("");
 		lines.push(`⚠ Windows：连服务器一律用别名走原生 ssh（ssh ${alias} "命令"）。`);
 		lines.push("  不要用 wsl ssh（WSL 是另一套没配置的环境，会卡在指纹确认/缺钥匙）。");
 	}
-
 	lines.push("");
-	lines.push(problems > 0 ? `共 ${problems} 项待处理` : "全部就绪。下一步：/reload，然后 /rl 开始循环");
+	lines.push("配置完成，不需要任何配置文件。");
+	lines.push("下一步：/reload，然后 /rl 开始循环。");
 	return { lines, done: problems === 0, needsAttention: attention };
 }

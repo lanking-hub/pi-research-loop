@@ -1,6 +1,6 @@
 # Environments & Troubleshooting
 
-table mode does not care how you launch experiments — it only looks for a `DONE` file.
+The extension does not care how you launch experiments — it only looks for a `DONE` file.
 This page covers how that works on common setups, and what to check when nothing happens.
 
 ---

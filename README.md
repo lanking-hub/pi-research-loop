@@ -28,19 +28,13 @@ The extension knows nothing about your metrics. It does not keep/discard, and do
 
 ---
 
-## Two ways to track experiments
+## The one contract
 
-| | **table mode** (default, for iteration) | **dir mode** (for baselines) |
-|---|---|---|
-| How experiments launch | **Up to you / the agent** — `nohup`, `sbatch`, `docker`, `conda` | Fixed `run_exp.sh` |
-| What the extension watches | Paths registered in `.auto/runs.csv`, checking for `DONE` | A fixed runs dir + server scripts reporting state |
-| Deploy scripts to the server? | **No** | Yes, `server/*.sh` |
-| Required config | **None (zero-config)** | `sshHost` + `runsPath` + `statusCommand` |
-| Best for | Open-ended method iteration | Fixed, repetitive batch runs |
+**When an experiment finishes, write a `DONE` file in its output directory.** Contents are up to you (metrics recommended).
 
-**table mode asks for exactly one thing**: when an experiment finishes, write a `DONE` file in its output directory (contents are up to you; metrics recommended).
+That's it. How you launch is entirely unconstrained — `nohup`, `sbatch`, `docker`, `conda`, multi-node. **Compatibility comes from not caring how you launch.** This is also why baselines and iteration need no separate mechanism: the extension can't tell them apart, and doesn't need to.
 
-How you launch is entirely unconstrained — which is why Slurm, Docker, multi-node and conda environments all just work. **Compatibility comes from not caring how you launch.**
+Alongside it, register the path so polling knows to look:
 
 Alongside it:
 
@@ -210,9 +204,8 @@ extensions/research-loop.ts   Main extension: commands + tools + polling
 lib/config.ts                 Config (includes the fixed SSH_ALIAS constant)
 lib/ssh.ts                    runRemote — the single remote-execution entry point
 lib/state.ts                  Registration times / already-reported (persisted)
-lib/paths.ts                  Locates bundled templates/ and server/
+lib/paths.ts                  Locates bundled templates/
 lib/setup.ts                  /rl setup interactive wizard
-server/*.sh                   dir mode only (baseline flow)
 templates/                    Copied into your project by /rl setup
 ```
 
@@ -247,8 +240,8 @@ The extension **only writes inside your working directory**. `~/.pi/agent/` is r
 ## Roadmap
 
 - [x] **Local mode**: pi installed directly on the server, no ssh (`"sshHost": "local"`)
+- [x] **Baseline support** — needs no separate extension: same loop, same table, distinguished by the `track` column
 - [ ] **Translate docs to English**
-- [ ] **Baseline batch-runner extension**: fetch reference methods, run each, record results
 - [ ] **Model chain with quota-based failover**: `lib/model-chain.ts`
 - [ ] **Inline templates**: drop the `import.meta.url` dependency for locating `templates/`
 
@@ -270,7 +263,7 @@ cd ~/research && pi
 /rl              # 开始循环
 ```
 
-- **table 模式唯一约定**：实验跑完在输出目录写 `DONE` 文件（内容随意，建议放指标）。怎么起实验不限——Slurm / Docker / conda / 裸机都行
+- **唯一约定**：实验跑完在输出目录写 `DONE` 文件（内容随意，建议放指标）。怎么起实验不限——Slurm / Docker / conda / 裸机都行
 - **零配置、服务器零部署**
 - **命令**：`/rl`（开始）、`stop`、`status`、`goal <文本>`、`agents`、`doctor`、`setup`、`help`
 - **中途介入**：改 `.auto/goal.md`；打字 Enter = steer；Esc = 停

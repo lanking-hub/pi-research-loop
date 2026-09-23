@@ -20,8 +20,3 @@ export function packageRoot(): string {
 export function templatesDir(): string {
 	return join(packageRoot(), "templates");
 }
-
-/** 服务器脚本目录：/rl setup 从这里上传 run_exp.sh / run_status.sh */
-export function serverDir(): string {
-	return join(packageRoot(), "server");
-}

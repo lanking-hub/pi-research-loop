@@ -16,20 +16,23 @@
  *   /rl            开始循环（已在跑则显示状态）
  *   /rl stop       停止
  *   /rl status     看状态
- *   /rl goal <文本> 往 .auto/goal.md 的「临时建议」加一条，下一轮自动生效
+ *   /rl goal <文本> 往 goal 的「临时建议」加一条，下一轮自动生效
+ *                  （-t <工作流> 写到 .auto/goal-<工作流>.md）
  *   /rl agents     项目里已有 AGENTS.md 时，让 agent 帮你合并（去重 + 精简），
  *                  背景提取自你的文档放在块外，规则块逐字保留
  *   /rl doctor     逐项实测环境，告诉你还差什么（只读体检）
  *   /rl help       显示所有命令的说明
  *   /rl setup      首次一站式：生成项目文件（AGENTS.md / goal / notes / runs.csv）
- *                  + 交互式配 ssh（生成钥匙、写别名、登记指纹、传脚本、写配置）
+ *                  + 交互式配 ssh（生成钥匙、写别名、登记指纹）
  *                  唯一人工环节（装公钥）会在向导内暂停等你确认，不用重跑。
  *                  每步幂等，半途失败后重跑是安全的。
  *
- * 配置：**可选**。table 模式零配置就能跑（ssh 别名是固定常量，`/rl setup` 自动写进
+ * 配置：**可选**。零配置就能跑（ssh 别名是固定常量，`/rl setup` 自动写进
  *       ~/.ssh/config）。想调参才建 `<项目>/.pi/research-loop.json`，字段见 docs/reference.md。
  *
- * 依赖：server/run_status.sh（状态）、server/run_exp.sh（起实验）部署到服务器上。
+ * 唯一的契约：agent 在登记表里写一条**服务器上的绝对路径**，
+ *           实验结束时在那个目录下写 `DONE`。扩展只认这一个信号——
+ *           实验怎么起（nohup / sbatch / docker / conda）它完全不关心。
  *
  * 注意：这个文件只能存在于一个位置。如果它同时出现在
  *   ~/.pi/agent/extensions/  和  <项目>/.pi/extensions/
@@ -42,18 +45,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { isConfigured, loadConfig, PLACEHOLDER, SSH_ALIAS, type Config } from "../lib/config.ts";
 import { templatesDir } from "../lib/paths.ts";
-import { expandRemotePath, remoteHome, runRemote } from "../lib/ssh.ts";
+import { runRemote } from "../lib/ssh.ts";
 import { runSetup } from "../lib/setup.ts";
 import { forget, loadState, markHandled, touch, type RunWatch } from "../lib/state.ts";
 
-type RunState = "RUNNING" | "DONE" | "CRASHED" | "STALLED" | "UNKNOWN";
-
-interface RunStatus {
-	id: string;
-	state: RunState;
-}
-
-/** 待唤醒队列里的一项：已经拼好的说明文字（两种模式各自生成） */
+/** 待唤醒队列里的一项：已经拼好的说明文字 */
 interface PendingItem {
 	key: string;
 	lines: string[];
@@ -62,28 +58,6 @@ interface PendingItem {
 /** 给远程 shell 用的单引号包裹（路径里可能含空格） */
 function shellQuote(s: string): string {
 	return `'${s.replace(/'/g, `'\''`)}'`;
-}
-
-/** 解析状态脚本输出：每行 "<runId> <STATE>" */
-function parseStatus(out: string): RunStatus[] {
-	const runs: RunStatus[] = [];
-	for (const line of out.split("\n")) {
-		const m = /^\s*(\S+)\s+(\S+)\s*$/.exec(line);
-		if (!m?.[1] || !m[2]) continue;
-		const raw = m[2].toUpperCase();
-		const state: RunState =
-			raw === "RUNNING"
-				? "RUNNING"
-				: raw === "DONE"
-					? "DONE"
-					: raw === "CRASHED"
-						? "CRASHED"
-						: raw === "STALLED"
-							? "STALLED"
-							: "UNKNOWN";
-		runs.push({ id: m[1], state });
-	}
-	return runs;
 }
 
 let cfg: Config = loadConfig();
@@ -382,61 +356,8 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 	maybeWake(pi);
 }
 
-/** dir 模式：固定 runs 目录 + 服务器脚本（baseline 那种死流程用） */
-async function pollDir(pi: ExtensionAPI): Promise<void> {
-	const res = await runRemote(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
-	if (!res.ok) {
-		handleSshFailure(pi, res);
-		return;
-	}
-	sshFailCount = 0;
-
-	const runs = parseStatus(res.out);
-	if (runs.length === 0) {
-		lastStatus = "statusCommand 无有效输出";
-		wake(
-			pi,
-			[
-				"轮询命令有返回但解析不出任何 run。原始输出：",
-				(res.out.trim() || "(空)").slice(0, 500),
-				"",
-				'期望格式：每行 "<runId> <STATE>"，STATE ∈ RUNNING|DONE|CRASHED|STALLED。',
-			].join("\n"),
-			"parse",
-		);
-		return;
-	}
-
-	for (const r of runs) {
-		if (r.state === "RUNNING" || watch.handled.includes(r.id)) continue;
-		const dir = `${cfg.runsPath}/${r.id}`;
-		const text =
-			r.state === "DONE"
-				? [`- ${r.id}：完成。读 ${dir}/DONE 和 ${dir}/log.txt 看结果。`]
-				: r.state === "CRASHED"
-					? [`- ${r.id}：崩溃。读 ${dir}/log.txt 定位报错。`]
-					: r.state === "STALLED"
-						? [`- ${r.id}：疑似卡死（日志长时间未更新）。检查后决定杀掉还是继续等。`]
-						: [`- ${r.id}：状态未知。请自行 ssh 到 ${cfg.sshHost} 检查 ${dir}。`];
-		enqueue({ key: r.id, lines: text });
-	}
-
-	const running = runs.filter((r) => r.state === "RUNNING").length;
-	lastStatus = `运行中 ${running}，待处理 ${pending.length}`;
-
-	if (running === 0 && pending.length === 0) {
-		stopPolling();
-		lastStatus = "没有运行中的 run，轮询已停止";
-		notify(lastStatus, "info");
-		return;
-	}
-
-	maybeWake(pi);
-}
-
 async function poll(pi: ExtensionAPI): Promise<void> {
-	if (cfg.mode === "dir") await pollDir(pi);
-	else await pollTable(pi);
+	await pollTable(pi);
 }
 
 /**
@@ -450,11 +371,6 @@ async function doctor(): Promise<void> {
 
 	const missing: string[] = [];
 	if (cfg.sshHost === PLACEHOLDER) missing.push("sshHost");
-	// dir 模式才需要固定目录和状态脚本；table 模式只要能连上服务器
-	if (cfg.mode === "dir") {
-		if (cfg.runsPath === PLACEHOLDER) missing.push("runsPath");
-		if (cfg.statusCommand === PLACEHOLDER) missing.push("statusCommand");
-	}
 
 	if (missing.length > 0) {
 		problems += 1;
@@ -473,45 +389,13 @@ async function doctor(): Promise<void> {
 			lines.push("  检查：~/.ssh/config 有这个 Host 吗？配了免密 key 吗？");
 		}
 
-		if (cfg.mode === "dir") {
-			// ~/ 在带引号的命令里不会被 shell 展开，先自己展开再查
-			const home = await remoteHome(cfg.sshHost, cfg.sshTimeoutSec);
-			const runsAbs = expandRemotePath(cfg.runsPath, home);
-			const dir = await runRemote(
-				cfg.sshHost,
-				`test -d ${JSON.stringify(runsAbs)} && echo yes || echo no`,
-				cfg.sshTimeoutSec,
-			);
-			if (dir.out.trim() === "yes") {
-				lines.push(`✓ runs 目录存在：${runsAbs}`);
-			} else {
-				problems += 1;
-				lines.push(`✗ runs 目录不存在：${runsAbs}`);
-				lines.push(`  服务器上先 mkdir -p ${runsAbs}`);
-				lines.push(`  （配置里写的是 ${cfg.runsPath}；带引号时 ~ 不会展开，建议直接写绝对路径）`);
-			}
-
-			const st = await runRemote(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
-			if (!st.ok) {
-				problems += 1;
-				lines.push("✗ statusCommand 执行失败");
-				lines.push(`  ${(st.err.trim() || st.out.trim() || "无输出").slice(0, 200)}`);
-				lines.push("  检查：脚本传上去了吗？chmod +x 了吗？RUNS_DIR 对吗？");
-			} else if (parseStatus(st.out).length === 0) {
-				lines.push("-- statusCommand 能跑，但还没有任何 run（没跑过实验时正常）");
-			} else {
-				lines.push(`✓ statusCommand 正常，${parseStatus(st.out).length} 个 run`);
-			}
+		// 登记表在不在、里面有没有路径
+		const table = readRunsTable();
+		if (table.length === 0) {
+			lines.push(`-- ${cfg.runsFile} 不存在或为空（还没登记任何实验，正常）`);
 		} else {
-			// table 模式：看登记表在不在、里面有没有路径
-			const table = readRunsTable();
-			if (table.length === 0) {
-				lines.push(`-- ${cfg.runsFile} 不存在或为空（还没登记任何实验，正常）`);
-			} else {
-				lines.push(`✓ ${cfg.runsFile} 有 ${table.length} 个在跑的实验`);
-			}
+			lines.push(`✓ ${cfg.runsFile} 有 ${table.length} 个在跑的实验`);
 		}
-
 	}
 
 	// 项目级文件（跟着 cwd）。
@@ -810,12 +694,7 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				if (!isConfigured(cfg)) {
-					notify(
-						cfg.mode === "dir"
-							? "配置未完成，先填 sshHost / runsPath / statusCommand"
-							: "配置未完成，先填 sshHost（没配过就跑 /rl setup）",
-						"warning",
-					);
+					notify("配置未完成，先填 sshHost（没配过就跑 /rl setup）", "warning");
 					return;
 				}
 				try {
@@ -1029,48 +908,6 @@ export default function (pi: ExtensionAPI) {
 				],
 				details: { ok: true },
 			};
-		},
-	});
-
-	pi.registerTool({
-		name: "start_run",
-		label: "Start Run",
-		description:
-			"在远程服务器上起一个实验 run。**起实验必须走这个工具**，不要直接 ssh nohup，否则 run 不在管理内，永远不会被轮询到。",
-		promptSnippet: "在远程服务器上起一个受管理的实验 run",
-		promptGuidelines: [
-			"起实验前先 ssh 查显卡占用（gpustat / nvidia-smi），把空闲的卡号传给 start_run 的 gpu 参数",
-			"不要用 ssh + nohup 直接起实验，必须走 start_run",
-			"连服务器一律走 ~/.ssh/config 里配置好的别名（原生 ssh），禁止 wsl ssh / 裸 IP",
-		],
-		parameters: Type.Object({
-			gpu: Type.String({ description: 'CUDA_VISIBLE_DEVICES，例如 "0" 或 "0,1"' }),
-			cmd: Type.String({ description: "在服务器上项目根目录执行的命令，例如 python train.py --cfg a.yaml" }),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-			cfg = loadConfig();
-			if (cfg.sshHost === PLACEHOLDER || cfg.startCommand === PLACEHOLDER) {
-				return {
-					content: [{ type: "text", text: "start_run 未配置：请先填 sshHost 和 startCommand" }],
-					details: { ok: false },
-				};
-			}
-			// gpu 拼进单引号里，先卡住格式，免得 agent 传进来的内容把命令结构撑坏
-			const gpu = params.gpu.trim();
-			if (!/^[\d,\s]+$/.test(gpu)) {
-				return {
-					content: [{ type: "text", text: `gpu 只能是数字和逗号（当前是「${gpu}」）` }],
-					details: { ok: false },
-				};
-			}
-			// 命令用 base64 传递，绕开所有 shell 引号问题
-			const b64 = Buffer.from(params.cmd, "utf8").toString("base64");
-			const remote = `${cfg.startCommand} --gpu '${gpu}' --cmd-b64 '${b64}'`;
-			const res = await runRemote(cfg.sshHost, remote, cfg.sshTimeoutSec);
-			const text = res.ok
-				? `已起 run：${res.out.trim() || "(无输出)"}`
-				: `起实验失败：${res.err.trim() || res.out.trim() || "(无输出)"}`;
-			return { content: [{ type: "text", text }], details: { ok: res.ok } };
 		},
 	});
 
