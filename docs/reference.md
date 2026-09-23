@@ -12,6 +12,7 @@
 | `/rl stop` | 停止 |
 | `/rl status` | 两行：循环状态 + 实验状态 |
 | `/rl goal <文本>` | 往 `.auto/goal.md` 的「临时建议」加一条 |
+| `/rl agents` | 已有 AGENTS.md 时让 agent 合并（去重 + 精简），背景放块外、规则逐字保留 |
 | `/rl doctor` | 环境体检（只读） |
 | `/rl setup` | 首次一站式：生成项目文件 + 配 ssh（需要 TUI 模式） |
 

@@ -17,6 +17,8 @@
  *   /rl stop       停止
  *   /rl status     看状态
  *   /rl goal <文本> 往 .auto/goal.md 的「临时建议」加一条，下一轮自动生效
+ *   /rl agents     项目里已有 AGENTS.md 时，让 agent 帮你合并（去重 + 精简），
+ *                  背景提取自你的文档放在块外，规则块逐字保留
  *   /rl doctor     逐项实测环境，告诉你还差什么（只读体检）
  *   /rl setup      首次一站式：生成项目文件（AGENTS.md / goal / notes / runs.txt）
  *                  + 交互式配 ssh（生成钥匙、写别名、登记指纹、传脚本、写配置）
@@ -424,6 +426,43 @@ async function doctor(): Promise<void> {
 const AGENTS_BEGIN = "<!-- BEGIN research-loop -->";
 const AGENTS_END = "<!-- END research-loop -->";
 
+/** 没有已有 AGENTS.md 时，背景先留个占位（它归你写，不在规则块里） */
+const BACKGROUND_STUB = `# 项目背景
+
+<!-- TODO: 用一两句话写清你在做什么、当前阶段的目标 -->`;
+
+/**
+ * 去掉模板里的「## 背景」一节。
+ *
+ * 背景要放在标记块**外面**：它是从你已有的 AGENTS.md 里提取出来的，
+ * 属于你；而标记块里的规则属于上游模板，自动更新时会整块替换——
+ * 背景放里面的话，你写的内容会被冲掉。
+ */
+function stripBackground(md: string): string {
+	const lines = md.split("\n");
+	const out: string[] = [];
+	let skipping = false;
+	for (const l of lines) {
+		if (/^##\s+背景\s*$/.test(l)) {
+			skipping = true;
+			continue;
+		}
+		if (skipping && /^##\s+/.test(l)) skipping = false;
+		if (!skipping) out.push(l);
+	}
+	return out.join("\n").trim();
+}
+
+/** 规则正文：模板去掉背景 + {{SSH_ALIAS}} 替换成实际别名 */
+function rulesBody(tplDir: string): string {
+	const src = join(tplDir, "AGENTS.research.md");
+	if (!existsSync(src)) return "";
+	return stripBackground(readFileSync(src, "utf8").trim()).replace(
+		/\{\{SSH_ALIAS\}\}/g,
+		cfg.sshHost || SSH_ALIAS,
+	);
+}
+
 /**
  * AGENTS.md 特殊处理：**不能跳过**。
  *
@@ -432,34 +471,81 @@ const AGENTS_END = "<!-- END research-loop -->";
  * 而 table 模式完全依赖 agent 遵守规则（写 DONE + 调 track_run），
  * 规则没进去 = 实验永远不会被等 = 静默失败。
  *
- * 所以：没有就创建；有就在末尾追加一个带标记的规则块；
- * 已经追加过就原地更新那一块（幂等，重复跑不会堆积）。
+ * 三种情况：
+ *   没有 AGENTS.md     → 生成（背景占位 + 规则块）
+ *   有标记块           → 只替换那一块，背景和其他内容不动
+ *   有但没标记块       → **不机械追加**（会和已有内容重复），提示跑 /rl agents 让模型合并
  */
 function installAgentsRules(tplDir: string): string {
 	const dest = join(process.cwd(), "AGENTS.md");
-	const src = join(tplDir, "AGENTS.research.md");
-	if (!existsSync(src)) return `✗ 模板缺失：AGENTS.research.md`;
-
-	// 模板里的 {{SSH_ALIAS}} 替换成实际别名，agent 才知道 ssh 用哪个名字
-	const body = readFileSync(src, "utf8").trim().replace(/\{\{SSH_ALIAS\}\}/g, cfg.sshHost || SSH_ALIAS);
-	const block = `${AGENTS_BEGIN}\n${body}\n${AGENTS_END}\n`;
+	const rules = rulesBody(tplDir);
+	if (!rules) return `✗ 模板缺失：AGENTS.research.md`;
+	const block = `${AGENTS_BEGIN}\n${rules}\n${AGENTS_END}\n`;
 
 	try {
 		if (!existsSync(dest)) {
-			writeFileSync(dest, block);
-			return `✓ 已生成：AGENTS.md（agent 规则）`;
+			writeFileSync(dest, `${BACKGROUND_STUB}\n\n${block}`);
+			return `✓ 已生成：AGENTS.md（背景待你写 + 规则块）`;
 		}
 		const cur = readFileSync(dest, "utf8");
 		if (cur.includes(AGENTS_BEGIN)) {
 			const re = new RegExp(`${AGENTS_BEGIN}[\\s\\S]*?${AGENTS_END}\\n?`);
 			writeFileSync(dest, cur.replace(re, block));
-			return `✓ 已更新：AGENTS.md 里的 research-loop 规则块`;
+			return `✓ 已更新：规则块（你的背景和其余内容未动）`;
 		}
-		writeFileSync(dest, `${cur.replace(/\s+$/, "")}\n\n${block}`);
-		return `✓ 已追加：research-loop 规则块到你已有的 AGENTS.md（原有内容未动）`;
+		return `-- 已有 AGENTS.md 但没合并过。跑 /rl agents 让 agent 帮你合并（避免重复）`;
 	} catch (e) {
 		return `✗ 写 AGENTS.md 失败：${e instanceof Error ? e.message : String(e)}`;
 	}
+}
+
+/** 让模型合并 AGENTS.md 的提示词 */
+function mergePrompt(existing: string, rules: string): string {
+	return [
+		"请帮我合并这个项目的 AGENTS.md。",
+		"",
+		"背景：我要在这个项目里用 pi-research-loop（自主科研迭代循环驱动器），",
+		"它需要把自己的规则写进 AGENTS.md。但项目里已经有一份了，",
+		"直接追加会和已有内容重复（背景、服务器连接方式、代码规范等都会出现两遍）。",
+		"",
+		"下面给你两份内容：`<existing>` 是现有的，`<rules>` 是需要并入的规则。",
+		"",
+		"请输出合并后的完整 AGENTS.md，遵守这些要求：",
+		"",
+		"1. **结构**：先是「## 背景」（来自 existing），然后是一个带标记的规则块：",
+		"   ```",
+		"   ## 背景",
+		"   ...",
+		"   <!-- BEGIN research-loop -->",
+		"   ...rules 全文...",
+		"   <!-- END research-loop -->",
+		"   ```",
+		"",
+		"2. **背景**：从 existing 里提取项目背景、目标、环境/连接信息",
+		"   （服务器别名、路径、数据集、怎么跑等），**精简成 3~8 行**。",
+		"   保留具体事实，不要泛化成套话。existing 没有的话写「（待补充）」。",
+		"",
+		"3. **规则块**：`<rules>` 的内容**逐字照抄，一个字都不要改**",
+		"   （标题层级、代码块、表格、符号都要一致）。这是硬性要求——",
+		"   它是上游模板，改了以后就没法自动更新了。",
+		"",
+		"4. **去重**：existing 里和 rules 重复的内容（「读 goal.md」「更新 notes.md」",
+		"   「起实验前查显卡」之类）不要重复出现，以 rules 为准。",
+		"",
+		"5. **保留独有信息**：existing 里 rules 没有、但有用的内容",
+		"   （特有的环境坑、数据集说明、评测脚本位置等），并入背景，",
+		"   或者作为「## 项目补充」放在规则块**之后**。",
+		"",
+		"6. 把结果**写入 AGENTS.md**（覆盖），不要只打印。写完简要说明改了什么。",
+		"",
+		"<existing>",
+		existing,
+		"</existing>",
+		"",
+		"<rules>",
+		rules,
+		"</rules>",
+	].join("\n");
 }
 
 /**
@@ -581,7 +667,7 @@ function stopPolling(): void {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("rl", {
-		description: "research-loop：开始循环（默认） / stop / status / goal / doctor / setup",
+		description: "research-loop：开始循环（默认） / stop / status / goal / agents / doctor / setup",
 		handler: async (args, ctx) => {
 			lastCtx = ctx;
 			cfg = loadConfig();
@@ -631,6 +717,28 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			if (a === "agents") {
+				const dest = join(process.cwd(), "AGENTS.md");
+				if (!existsSync(dest)) {
+					notify(`当前目录没有 AGENTS.md，不需要合并（跑 /rl setup 会生成一份）`, "info");
+					return;
+				}
+				const tplDir = templatesDir();
+				const rules = rulesBody(tplDir);
+				if (!rules) {
+					notify(`找不到规则模板：${join(tplDir, "AGENTS.research.md")}`, "error");
+					return;
+				}
+				// 把合并这件事交给模型：机械追加会和已有内容重复，
+				// 而「哪些该保留、哪些该精简」正是模型擅长的
+				lastWakeAt = Date.now();
+				pi.sendUserMessage(mergePrompt(readFileSync(dest, "utf8"), rules), {
+					deliverAs: "followUp",
+				});
+				notify("已把合并任务交给 agent：它会读现有 AGENTS.md + 规则模板，写出合并后的版本", "info");
+				return;
+			}
+
 			if (a === "doctor" || a === "check") {
 				await doctor();
 				return;
@@ -671,7 +779,10 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			notify("用法：/rl（开始循环） | /rl stop | /rl status | /rl goal <文本> | /rl doctor | /rl setup", "warning");
+			notify(
+				"用法：/rl（开始循环） | /rl stop | /rl status | /rl goal <文本> | /rl agents | /rl doctor | /rl setup",
+				"warning",
+			);
 		},
 	});
 

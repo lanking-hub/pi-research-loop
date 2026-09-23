@@ -75,7 +75,7 @@ It first generates project files:
 
 | File | Purpose |
 |---|---|
-| `AGENTS.md` | Agent rules. **If you already have one, a block is appended** — your content is untouched |
+| `AGENTS.md` | Agent rules. If you already have one, it is **not appended blindly** — run `/rl agents` to let the agent merge it |
 | `.auto/goal.md` | **You write**: method, goal, which metrics matter, rough direction |
 | `.auto/notes.md` | Agent writes: progress, dead ends (rewritten each turn) |
 | `.auto/runs.txt` | Running experiments (agent adds/removes) |
@@ -112,6 +112,7 @@ Then just tell the agent what to work on. It launches the first experiment, and 
 /rl stop          Stop
 /rl status        Status
 /rl goal <text>   Append a note to .auto/goal.md, picked up next turn
+/rl agents        Merge into an existing AGENTS.md (dedupe + condense) — done by the agent
 /rl doctor        Environment check (read-only)
 /rl setup         First-time: generate project files + configure ssh (needs TUI mode)
 ```
@@ -150,6 +151,44 @@ ssh research-loop-server "which sbatch; which docker; which conda; nvidia-smi -L
 See [docs/environments.md](docs/environments.md) for cloud GPU platforms, Slurm details, and troubleshooting.
 
 ---
+
+## AGENTS.md: two parts, owned differently
+
+`AGENTS.md` is split by a marker pair:
+
+```markdown
+## 背景                          ← yours (project background, extracted from your existing doc)
+
+<!-- BEGIN research-loop -->     ← upstream rules, verbatim
+...
+<!-- END research-loop -->
+
+## 项目补充                       ← optional, yours again
+```
+
+| Part | Owner | On update |
+|---|---|---|
+| Outside the markers | **You** | Never touched |
+| Inside the markers | Upstream template | Replaced wholesale |
+
+**Why split it this way:** the rules must stay byte-identical to the template so they can be regenerated later. Your background must survive that regeneration. Putting them on opposite sides of the marker makes both true.
+
+### If you already have an AGENTS.md
+
+`/rl setup` will **not** append blindly — that would duplicate your background, connection info and code conventions. Instead run:
+
+```bash
+/rl agents
+```
+
+This hands the merge to the agent: it reads your existing `AGENTS.md` plus the rules template, and writes a merged version that
+
+- condenses your background into 3–8 lines, keeping concrete facts (host alias, paths, dataset names)
+- copies the rules **verbatim** (they must not be edited)
+- drops anything that would now be duplicated
+- keeps your unique bits (env quirks, dataset notes) as a `## 项目补充` section after the block
+
+You can of course do it by hand — the rules template is at `templates/AGENTS.research.md` in the installed package.
 
 ## Design notes
 
