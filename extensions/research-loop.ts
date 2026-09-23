@@ -645,7 +645,21 @@ export default function (pi: ExtensionAPI) {
 				const report = await runSetup({
 					ask: (title, placeholder) => ctx.ui.input(title, placeholder),
 					confirm: (title, message) => ctx.ui.confirm(title, message),
+					say: (text) => notify(text, "info"),
+					status: (text) => {
+						try {
+							ctx.ui.setWidget("rl-setup", text ? [text] : undefined, { placement: "aboveEditor" });
+						} catch {
+							// 没 UI 就算了
+						}
+					},
 				});
+				// 无论成功失败都清掉状态行（setup 内部有多个提前 return 的分支）
+				try {
+					ctx.ui.setWidget("rl-setup", undefined);
+				} catch {
+					// 忽略
+				}
 				cfg = loadConfig();
 				notify(
 					[...fileLines, "", ...report.lines, "", "最后：/reload（AGENTS.md 要重新加载），然后 /rl 开始循环"].join(

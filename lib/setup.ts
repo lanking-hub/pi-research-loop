@@ -37,6 +37,14 @@ export interface SetupUI {
 	ask(title: string, placeholder?: string): Promise<string | undefined>;
 	/** 等用户确认；取消返回 false */
 	confirm(title: string, message: string): Promise<boolean>;
+	/**
+	 * 立刻把一段文字显示给用户。
+	 * 必须有：报告是在 setup 跑完后才统一输出的，而 confirm 是中途弹的，
+	 * 不提前说的话用户会看到「执行上面那条命令」却压根没有命令。
+	 */
+	say(text: string): void;
+	/** 常驻状态行（耗时步骤前调用，结束传 undefined 清除） */
+	status(text: string | undefined): void;
 }
 
 export interface SetupReport {
@@ -177,7 +185,9 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	} else {
 		mkdirSync(sshDir(), { recursive: true });
 		keyPath = join(sshDir(), "id_ed25519");
+		ui.status("正在生成钥匙对 …");
 		const gen = await exec(keygenBin, ["-t", "ed25519", "-N", "", "-q", "-f", keyPath]);
+		ui.status(undefined);
 		if (gen.ok && existsSync(keyPath)) {
 			lines.push(`✓ 已生成新钥匙对：${keyPath}`);
 			lines.push("  ⚠ 这把私钥没有密码（免密登录需要）。不要外传、不要提交进 git。");
@@ -230,6 +240,7 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	// ── 5. 指纹登记 + 免密连通（卡住就在这里等，不要求重跑）──
 	let connected = false;
 	for (let attempt = 1; attempt <= MAX_KEY_ATTEMPTS; attempt++) {
+		ui.status(`正在连接 ${user}@${host} …`);
 		let probe = await runRemote(alias, "echo __RL_OK__", 10);
 		if (probe.ok && probe.out.includes("__RL_OK__")) {
 			connected = true;
@@ -237,10 +248,12 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		}
 
 		// 首连的指纹确认在 BatchMode 下必失败，替用户踩掉
+		ui.status(`正在登记 ${host} 的指纹 …`);
 		const scan = await exec(keyscanBin, ["-T", "8", host]);
 		if (scan.ok && scan.out.trim()) {
 			appendFileSync(join(sshDir(), "known_hosts"), scan.out.endsWith("\n") ? scan.out : `${scan.out}\n`);
 			lines.push("✓ 已登记服务器指纹（known_hosts）");
+			ui.status(`正在连接 ${user}@${host} …`);
 			probe = await runRemote(alias, "echo __RL_OK__", 10);
 			if (probe.ok && probe.out.includes("__RL_OK__")) {
 				connected = true;
@@ -254,16 +267,23 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 
 		lines.push("");
 		lines.push("还差一步：把公钥装到服务器（需要输一次服务器密码，之后永久免密）。");
-		lines.push("请**另开一个终端**执行：");
+		lines.push("**另开一个终端**执行：");
 		lines.push(`  ${installCmd}`);
 		lines.push("");
 
-		const ok = await ui.confirm("装好了吗？", "执行完上面那条命令后选 Yes，我会继续");
+		// 关键：confirm 是中途弹的，而报告要等 setup 跑完才统一输出。
+		// 不先把命令显示出来，用户会看到「执行上面那条命令」却看不到命令。
+		ui.status(undefined);
+		ui.say(lines.join("\n"));
+		const ok = await ui.confirm("公钥装好了吗？", `另开终端执行：\n\n  ${installCmd}\n\n输一次服务器密码。执行完选 Yes 继续。`);
 		if (!ok) {
 			lines.push("已取消。随时重跑 /rl setup 继续（前面的步骤会自动跳过）。");
 			return { lines, done: false, needsAttention: false };
 		}
+		ui.status("正在重新检查连接 …");
 	}
+
+	ui.status(undefined);
 
 	if (!connected) {
 		lines.push(`✗ 试了 ${MAX_KEY_ATTEMPTS} 次仍无法免密登录`);
@@ -272,7 +292,9 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	}
 	lines.push(`✓ 免密连通：ssh ${alias}`);
 
+	ui.status("正在修正服务器端 ssh 权限 …");
 	await runRemote(alias, "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys", 10);
+	ui.status(undefined);
 	lines.push("✓ 服务器端 ssh 权限已确认（700/600）");
 
 	// ── 6. table 模式到此为止 ──────────────────────────────
