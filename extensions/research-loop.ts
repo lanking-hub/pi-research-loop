@@ -23,7 +23,8 @@
  *                  唯一人工环节（装公钥）会在向导内暂停等你确认，不用重跑。
  *                  每步幂等，半途失败后重跑是安全的。
  *
- * 配置：~/.pi/agent/research-loop.json（全局）或 <项目>/.pi/research-loop.json（项目级）
+ * 配置：**可选**。table 模式零配置就能跑（ssh 别名是固定常量，`/rl setup` 自动写进
+ *       ~/.ssh/config）。想调参才建 `<项目>/.pi/research-loop.json`，字段见 docs/reference.md。
  *
  * 依赖：server/run_status.sh（状态）、server/run_exp.sh（起实验）部署到服务器上。
  *
@@ -36,7 +37,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { isConfigured, loadConfig, PLACEHOLDER, type Config } from "../lib/config.ts";
+import { isConfigured, loadConfig, PLACEHOLDER, SSH_ALIAS, type Config } from "../lib/config.ts";
 import { templatesDir } from "../lib/paths.ts";
 import { expandRemotePath, remoteHome, runSsh } from "../lib/ssh.ts";
 import { runSetup } from "../lib/setup.ts";
@@ -350,7 +351,7 @@ async function doctor(): Promise<void> {
 	if (missing.length > 0) {
 		problems += 1;
 		lines.push(`✗ 配置未填：${missing.join(", ")}`);
-		lines.push(`  填 ~/.pi/agent/research-loop.json 或 <项目>/.pi/research-loop.json`);
+		lines.push(`  跑 /rl setup 补齐，或手动填 <项目>/.pi/research-loop.json`);
 	} else {
 		lines.push("✓ 配置字段已填");
 
@@ -439,7 +440,9 @@ function installAgentsRules(tplDir: string): string {
 	const src = join(tplDir, "AGENTS.research.md");
 	if (!existsSync(src)) return `✗ 模板缺失：AGENTS.research.md`;
 
-	const block = `${AGENTS_BEGIN}\n${readFileSync(src, "utf8").trim()}\n${AGENTS_END}\n`;
+	// 模板里的 {{SSH_ALIAS}} 替换成实际别名，agent 才知道 ssh 用哪个名字
+	const body = readFileSync(src, "utf8").trim().replace(/\{\{SSH_ALIAS\}\}/g, cfg.sshHost || SSH_ALIAS);
+	const block = `${AGENTS_BEGIN}\n${body}\n${AGENTS_END}\n`;
 
 	try {
 		if (!existsSync(dest)) {
@@ -472,7 +475,8 @@ function ensureProjectFiles(): string[] {
 		{ from: "goal.md", to: join(".auto", "goal.md"), hint: "你写方向" },
 		{ from: "notes.md", to: join(".auto", "notes.md"), hint: "agent 写进度" },
 		{ from: "runs.txt", to: join(".auto", "runs.txt"), hint: "正在跑的实验（agent 增删）" },
-		{ from: "research-loop.json", to: join(".pi", "research-loop.json"), hint: "项目级配置" },
+		// 注意：不生成 research-loop.json。table 模式零配置就能跑，
+		// 想调参的人自己建（字段见 docs/reference.md）。
 	];
 
 	const lines: string[] = [installAgentsRules(tplDir)];

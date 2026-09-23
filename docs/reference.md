@@ -28,11 +28,18 @@
 
 ---
 
+## 配置文件：**可选**（默认不需要）
+
+table 模式**零配置就能跑**。ssh 别名是固定常量 `research-loop-server`，
+由 `/rl setup` 自动写进 `~/.ssh/config`，不暴露给用户。
+
+只有想调参时才建 `<项目>/.pi/research-loop.json`（或全局 `~/.pi/agent/research-loop.json`，项目级覆盖全局）。
+
 ## 配置字段（11 个）
 
 | 字段 | 默认值 | 说明 | table 模式 |
 |---|---|---|---|
-| `sshHost` | `TODO` | ssh 别名 | ✅ **唯一必填** |
+| `sshHost` | `research-loop-server` | ssh 别名 | ✅ 一般不用改 |
 | `mode` | `"table"` | table / dir | ✅ |
 | `runsFile` | `.auto/runs.txt` | 登记表路径 | ✅ |
 | `maxHours` | `72` | 超时兜底 | ✅ |
@@ -44,9 +51,10 @@
 | `statusCommand` | `TODO` | 报状态的命令 | ❌ dir 才用 |
 | `startCommand` | `TODO` | 起实验的命令 | ❌ dir 才用 |
 
-**table 模式只需要填 `sshHost`**，其余都有默认值。
+**table 模式一个都不用填**，其余都有默认值。
 
-配置文件位置：`~/.pi/agent/research-loop.json`（全局）或 `<项目>/.pi/research-loop.json`（项目级，覆盖全局）。
+配置文件位置（可选）：`~/.pi/agent/research-loop.json`（全局）或 `<项目>/.pi/research-loop.json`（项目级，覆盖全局）。
+占位值（`TODO`）不会覆盖上一层已填好的值，所以"只填一部分"是安全的。
 
 ---
 
@@ -66,7 +74,6 @@ templates/AGENTS.research.md  agent 规则 ← 最关键
 templates/goal.md             方向模板
 templates/notes.md            进度模板
 templates/runs.txt            登记表模板
-templates/research-loop.json  配置模板
 docs/internals.md             机制与坑
 docs/setup-windows.md         Windows 上手清单
 docs/reference.md             本页

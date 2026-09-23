@@ -46,7 +46,7 @@
 **1. 起实验，并拿到进程号**
 
 ```bash
-ssh <别名> "cd /项目 && nohup python train.py > /输出目录/log.txt 2>&1 & echo \$!"
+ssh {{SSH_ALIAS}} "cd /项目 && nohup python train.py > /输出目录/log.txt 2>&1 & echo \$!"
 ```
 
 最后那个数字就是进程号。
@@ -90,7 +90,7 @@ track_run(path="<输出目录的服务器绝对路径>", pid="<第 1 步的进�
 ## 其他约定
 
 - **起实验前必须先查显卡占用**，自己 ssh 查：
-  `ssh <别名> "gpustat"`（没装 gpustat 就用
+  `ssh {{SSH_ALIAS}} "gpustat"`（没装 gpustat 就用
   `nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv`）
   只往**确认空闲**的卡上放实验——服务器上还有别人
 - **并发上限见 `.auto/goal.md`**（多人共用的服务器务必设上限，不要占满）
@@ -100,10 +100,10 @@ track_run(path="<输出目录的服务器绝对路径>", pid="<第 1 步的进�
 ### SSH 使用纪律（排查问题必读）
 
 - 排查服务器问题**可以自由使用 ssh**（看日志、查进程、kill、nvidia-smi……），但**必须走正门**：
-  `ssh <别名> '<任意命令>'`（原生 ssh + `~/.ssh/config` 里配好的别名，即配置里的 `sshHost`）
+  `ssh {{SSH_ALIAS}} '<任意命令>'`（原生 ssh + `~/.ssh/config` 里配好的别名）
 - **禁止 `wsl ssh`**（Windows 的 WSL 是另一套没配置的环境：独立的钥匙和指纹记录，会卡在指纹确认/缺钥匙）
 - **禁止 `ssh 用户@裸IP`**（绕过别名配置，同样会卡交互确认）
-- 不确定别名时看 `.pi/research-loop.json` 里的 `sshHost` 字段
+- 别名是 `{{SSH_ALIAS}}`，由 `/rl setup` 自动配好，不用你管
 
 ## 代码管理
 

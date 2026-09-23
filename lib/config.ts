@@ -7,6 +7,19 @@ export const CONFIG_NAME = "research-loop.json";
 /** 配置里还没填的值。填之前扩展拒绝启动，避免空转烧 token。 */
 export const PLACEHOLDER = "TODO";
 
+/**
+ * 固定的 ssh 别名。
+ *
+ * 这是**实现细节**，不需要用户理解或配置：`/rl setup` 只问服务器地址和用户名，
+ * 然后自己把这个别名写进 `~/.ssh/config`。
+ *
+ * 名字取得比较特殊，避免和用户已有的 Host 撞车。
+ * 万一真撞了（且指向别的机器），setup 会检测到并报错，不会静默连错服务器。
+ *
+ * 想换别名的话，在配置里写 `sshHost`（见 SSH_ALIAS 的使用处）覆盖即可。
+ */
+export const SSH_ALIAS = "research-loop-server";
+
 export interface Config {
 	/**
 	 * 两种盯实验的方式：
@@ -42,7 +55,7 @@ export const DEFAULTS: Config = {
 	mode: "table",
 	runsFile: ".auto/runs.txt",
 	maxHours: 72,
-	sshHost: PLACEHOLDER,
+	sshHost: SSH_ALIAS,
 	runsPath: PLACEHOLDER,
 	statusCommand: PLACEHOLDER,
 	startCommand: PLACEHOLDER,
@@ -82,8 +95,9 @@ export function loadConfig(): Config {
 }
 
 export function isConfigured(c: Config): boolean {
-	if (c.sshHost === PLACEHOLDER) return false;
-	// dir 模式还需要固定目录和状态脚本；table 模式只要能连上服务器就够了
+	// sshHost 有默认值（固定别名），所以 table 模式开箱即用，不需要任何配置文件
+	if (!c.sshHost) return false;
+	// dir 模式还需要固定目录和状态脚本
 	if (c.mode === "dir") return c.runsPath !== PLACEHOLDER && c.statusCommand !== PLACEHOLDER;
 	return true;
 }

@@ -2,12 +2,12 @@
  * /rl setup —— 交互式一键整备向导。
  *
  * 设计原则：
+ *   - **问得越少越好**：table 模式只问「服务器地址」和「用户名」两件事。
+ *     ssh 别名是固定常量（内部细节），不暴露给用户。
  *   - **一次跑完**：需要人动手的环节（装公钥）在向导内部暂停等待确认，
  *     不要求用户「跑两遍」。
- *   - **每一步都问**：用 ctx.ui.input 逐个问，不要求用户在一条命令里把参数给全。
- *     已填过的配置作为默认值预填，减少打字。
- *   - **幂等**：已完成的步骤自动跳过，所以半途失败后重跑是安全的。
- *   - **自动写配置**：问到的信息直接落进项目级配置，不要求用户手填。
+ *   - **幂等**：已完成的步骤自动跳过，半途失败后重跑是安全的。
+ *   - **零配置**：table 模式不需要任何配置文件，配完 ssh 就能跑。
  *
  * 唯一躲不开的手动环节：把公钥装上服务器需要输一次服务器密码。
  * ssh 不从 stdin 读密码（安全设计），没有 PTY 就自动化不了，所以这一步
@@ -18,7 +18,7 @@ import { execFile } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { CONFIG_NAME, loadConfig, type Config } from "./config.ts";
+import { CONFIG_NAME, loadConfig, SSH_ALIAS, type Config } from "./config.ts";
 import { serverDir } from "./paths.ts";
 import { expandRemotePath, remoteHome, runSsh, sshBin } from "./ssh.ts";
 
@@ -27,7 +27,6 @@ const scpBin = IS_WIN ? "scp.exe" : "scp";
 const keyscanBin = IS_WIN ? "ssh-keyscan.exe" : "ssh-keyscan";
 const keygenBin = IS_WIN ? "ssh-keygen.exe" : "ssh-keygen";
 
-const DEFAULT_ALIAS = "research-server";
 const DEFAULT_RUNS = "~/runs";
 const REMOTE_BIN = "~/bin";
 const MAX_KEY_ATTEMPTS = 3;
@@ -78,21 +77,46 @@ function existingKey(): string | undefined {
 	return undefined;
 }
 
-function configHasAlias(alias: string): boolean {
+function escapeRegExp(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasHostLine(alias: string): boolean {
 	const p = sshConfigPath();
 	if (!existsSync(p)) return false;
 	return new RegExp(`^\\s*Host\\s+${escapeRegExp(alias)}\\s*$`, "m").test(readFileSync(p, "utf8"));
 }
 
-function escapeRegExp(s: string): string {
-	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * 读出某个 Host 块里的 HostName。
+ *
+ * 这是**必需的兜底**：别名是固定的，万一用户 ~/.ssh/config 里已经有同名 Host
+ * 且指向别的机器，沿用它会**静默连错服务器**——那比报错糟糕得多。
+ */
+function aliasHostName(alias: string): string | undefined {
+	const p = sshConfigPath();
+	if (!existsSync(p)) return undefined;
+	let inBlock = false;
+	for (const raw of readFileSync(p, "utf8").split("\n")) {
+		const line = raw.trim();
+		if (/^Host\s+/i.test(line)) {
+			inBlock = line.slice(5).trim().split(/\s+/).includes(alias);
+			continue;
+		}
+		if (/^Match\s+/i.test(line)) {
+			inBlock = false;
+			continue;
+		}
+		if (inBlock && /^HostName\s+/i.test(line)) return line.slice(9).trim();
+	}
+	return undefined;
 }
 
 function projectConfigPath(): string {
 	return join(process.cwd(), ".pi", CONFIG_NAME);
 }
 
-/** 把问到的配置写进项目级配置，合并而非覆盖 */
+/** 写项目级配置，合并而非覆盖（只有 dir 模式用得上） */
 function writeProjectConfig(patch: Partial<Config>, lines: string[]): void {
 	const p = projectConfigPath();
 	let current: Record<string, unknown> = {};
@@ -101,10 +125,9 @@ function writeProjectConfig(patch: Partial<Config>, lines: string[]): void {
 	} catch {
 		current = {};
 	}
-	const merged = { ...current, ...patch };
 	try {
 		mkdirSync(join(process.cwd(), ".pi"), { recursive: true });
-		writeFileSync(p, `${JSON.stringify(merged, null, 2)}\n`);
+		writeFileSync(p, `${JSON.stringify({ ...current, ...patch }, null, 2)}\n`);
 		lines.push(`✓ 配置已写入 ${join(".pi", CONFIG_NAME)}`);
 	} catch (e) {
 		lines.push(`✗ 写配置失败：${e instanceof Error ? e.message : String(e)}`);
@@ -150,10 +173,8 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	}
 	const pubKeyPath = `${keyPath}.pub`;
 
-	// ── 3. 问服务器信息（已配置的作为默认值）─────────────────
-	const knownAlias = cfg.sshHost !== "TODO" ? cfg.sshHost : undefined;
-
-	const host = (await ui.ask("服务器地址（IP 或域名）", knownAlias ?? "例如 192.168.1.50"))?.trim();
+	// ── 3. 只问两件事：服务器地址、用户名 ──────────────────
+	const host = (await ui.ask("服务器地址（IP 或域名）", "例如 192.168.1.50"))?.trim();
 	if (!host) {
 		lines.push("✗ 未获取服务器地址，已取消");
 		return { lines, done: false, needsAttention: false };
@@ -165,16 +186,29 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		return { lines, done: false, needsAttention: false };
 	}
 
-	const aliasInput = (await ui.ask("ssh 别名（直接回车用默认）", knownAlias ?? DEFAULT_ALIAS))?.trim();
-	const alias = aliasInput || knownAlias || DEFAULT_ALIAS;
+	// 别名固定（内部细节），但允许配置覆盖，以防万一撞名
+	const alias = cfg.sshHost || SSH_ALIAS;
 
-	// ── 4. 写 ~/.ssh/config ────────────────────────────────
-	if (configHasAlias(alias)) {
-		lines.push(`✓ 别名已存在：${alias}（沿用，不改动）`);
+	// ── 4. 写 ~/.ssh/config（带冲突检测）───────────────────
+	if (hasHostLine(alias)) {
+		const existingHost = aliasHostName(alias);
+		if (existingHost && existingHost !== host) {
+			problems += 1;
+			attention = true;
+			lines.push(`✗ 冲突：~/.ssh/config 里的 ${alias} 已存在，且指向 ${existingHost}`);
+			lines.push(`  不是你要配的 ${host}。沿用它会连错机器，所以我不动它。`);
+			lines.push("");
+			lines.push("两种解法（任选一）：");
+			lines.push(`  1. 手动编辑 ~/.ssh/config，删掉或改名 ${alias} 那个块，重跑 /rl setup`);
+			lines.push(`  2. 在 .pi/research-loop.json 里设 "sshHost": "别的名字"，重跑 /rl setup`);
+			return { lines, done: false, needsAttention: true };
+		}
+		lines.push(`✓ 别名已存在且指向同一台机器：${alias}（沿用）`);
 	} else {
 		mkdirSync(sshDir(), { recursive: true });
 		appendFileSync(sshConfigPath(), `\nHost ${alias}\n  HostName ${host}\n  User ${user}\n`);
-		lines.push(`✓ 已写入别名 ${alias} → ${user}@${host}`);
+		lines.push(`✓ 已配置 ${alias} → ${user}@${host}`);
+		lines.push("  （这个别名是内部用的，你不用记）");
 	}
 
 	// ── 5. 指纹登记 + 免密连通（卡住就在这里等，不要求重跑）──
@@ -198,7 +232,6 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 			}
 		}
 
-		// 还连不上 = 公钥大概率没装。给命令，等用户执行完确认。
 		const installCmd = IS_WIN
 			? `type "${pubKeyPath.replace(/\//g, "\\")}" | ssh ${user}@${host} "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"`
 			: `cat ${pubKeyPath} | ssh ${user}@${host} "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"`;
@@ -209,7 +242,7 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		lines.push(`  ${installCmd}`);
 		lines.push("");
 
-		const ok = await ui.confirm("装好了吗？", "执行完上面那条命令后选 Yes，我会继续后面的整备");
+		const ok = await ui.confirm("装好了吗？", "执行完上面那条命令后选 Yes，我会继续");
 		if (!ok) {
 			lines.push("已取消。随时重跑 /rl setup 继续（前面的步骤会自动跳过）。");
 			return { lines, done: false, needsAttention: false };
@@ -223,10 +256,25 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	}
 	lines.push(`✓ 免密连通：ssh ${alias}`);
 
-	// ── 6. 服务器端整备 ────────────────────────────────────
 	await runSsh(alias, "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys", 10);
 	lines.push("✓ 服务器端 ssh 权限已确认（700/600）");
 
+	// ── 6. table 模式到此为止 ──────────────────────────────
+	// table 模式不需要传脚本、不需要固定 runs 目录、不需要配置文件——
+	// 那些都是 dir 模式（baseline 流程）才要的。
+	if (cfg.mode !== "dir") {
+		if (IS_WIN) {
+			lines.push("");
+			lines.push(`⚠ Windows：连服务器一律用别名走原生 ssh（ssh ${alias} "命令"）。`);
+			lines.push("  不要用 wsl ssh（WSL 是另一套没配置的环境，会卡在指纹确认/缺钥匙）。");
+		}
+		lines.push("");
+		lines.push("配置完成，不需要任何配置文件。");
+		lines.push("下一步：/reload，然后 /rl 开始循环。");
+		return { lines, done: problems === 0, needsAttention: attention };
+	}
+
+	// ── 以下只有 dir 模式才会走到 ──────────────────────────
 	const binDir = await runSsh(alias, `mkdir -p ${REMOTE_BIN} && echo ok`, 10);
 	if (!binDir.ok) {
 		problems += 1;
@@ -252,7 +300,6 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		if (uploaded > 0) lines.push(`✓ 管理脚本已上传并赋执行权限（${REMOTE_BIN}/，共 ${uploaded} 个）`);
 	}
 
-	// ── 7. 问路径（~/ 会展开成服务器上的绝对路径再落盘）──────
 	const home = await remoteHome(alias, 10);
 	const runsDefault = cfg.runsPath !== "TODO" ? cfg.runsPath : DEFAULT_RUNS;
 	const runsRaw = (await ui.ask("服务器上 runs 目录路径（放实验结果）", runsDefault))?.trim() || runsDefault;
@@ -278,7 +325,6 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		lines.push(`  （${projectRaw} → ${projectPath}）`);
 	}
 
-	// ── 8. 自动写配置 ──────────────────────────────────────
 	const patch: Partial<Config> = {
 		sshHost: alias,
 		runsPath,
@@ -289,7 +335,6 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	}
 	writeProjectConfig(patch, lines);
 
-	// ── 9. 平台提醒 ────────────────────────────────────────
 	if (IS_WIN) {
 		lines.push("");
 		lines.push(`⚠ Windows：连服务器一律用别名走原生 ssh（ssh ${alias} "命令"）。`);
@@ -297,8 +342,6 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	}
 
 	lines.push("");
-	lines.push(problems > 0 ? `共 ${problems} 项待处理` : "全部就绪。下一步：/reload，然后 /rl doctor 复查、/rl start 开跑");
+	lines.push(problems > 0 ? `共 ${problems} 项待处理` : "全部就绪。下一步：/reload，然后 /rl 开始循环");
 	return { lines, done: problems === 0, needsAttention: attention };
 }
-
-export { DEFAULT_ALIAS };
