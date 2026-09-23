@@ -110,14 +110,12 @@ function statusText(): string {
 }
 
 function buildWakeMessage(batch: PendingItem[]): string {
+	// 只做「叫醒」+ 报状态。每轮具体怎么干写在 AGENTS.md 里，别塞在这儿——
+	// 那段内容需要人随时能改，而且它每轮都会进上下文，不该硬编码在扩展里。
 	const lines: string[] = ["上一轮的实验有结果了，继续推进。", ""];
 	for (const item of batch) lines.push(...item.lines);
 	lines.push("");
-	lines.push("接下来这一轮：");
-	lines.push("1. 看结果（DONE / 日志），判断这次改动值不值");
-	lines.push("2. 按 AGENTS.md 更新 .auto/notes.md（每轮重写，含死胡同）");
-	lines.push("3. 改方法 / 改代码 —— 这是重点，实验只是验证手段");
-	lines.push("4. 起下一个实验验证，并用 track_run 登记（处理完的先从 .auto/runs.txt 删掉）");
+	lines.push("按 AGENTS.md 的「每一轮怎么工作」继续。");
 	return lines.join("\n");
 }
 
