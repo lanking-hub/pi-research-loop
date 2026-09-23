@@ -15,10 +15,11 @@
  *   /rl poll     立刻轮询一次
  *   /rl init     把 templates/ 生成到当前项目（已存在的文件不覆盖）
  *   /rl doctor   逐项实测环境，告诉你还差什么（只读体检）
- *   /rl setup <IP> <用户名> [别名]
- *                从零到可用的配置向导：生成钥匙对、写 ssh 别名、登记指纹、
- *                传服务器脚本、建目录。每步幂等，卡在哪重跑到哪；唯一人工
- *                环节（装公钥）会打印按平台给好的命令。
+ *   /rl setup    从零到可用的交互式向导：一步步问服务器地址/用户名/别名/
+ *                runs 目录/项目路径，然后生成钥匙对、写 ssh 别名、登记指纹、
+ *                传服务器脚本、建目录、**并自动写入配置**。
+ *                唯一人工环节（装公钥）会在向导内暂停等你确认，不需要重跑。
+ *                每步幂等，半途失败后重跑是安全的。
  *
  * 配置：~/.pi/agent/research-loop.json（全局）或 <项目>/.pi/research-loop.json（项目级）
  *
@@ -36,7 +37,7 @@ import { Type } from "typebox";
 import { isConfigured, loadConfig, PLACEHOLDER, type Config } from "../lib/config.ts";
 import { templatesDir } from "../lib/paths.ts";
 import { runSsh } from "../lib/ssh.ts";
-import { setup } from "../lib/setup.ts";
+import { runSetup } from "../lib/setup.ts";
 
 type RunState = "RUNNING" | "DONE" | "CRASHED" | "STALLED" | "UNKNOWN";
 
@@ -382,35 +383,15 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (a.startsWith("setup")) {
-				const rest = a.slice("setup".length).trim();
-				const parts = rest.split(/\s+/).filter(Boolean);
-				let host: string | undefined;
-				let user: string | undefined;
-				let alias: string | undefined;
-				if (parts.length >= 2) {
-					host = parts[0];
-					user = parts[1];
-					alias = parts[2];
-				} else if (parts.length === 1) {
-					// 只给别名：对该别名做「只补缺」整备
-					alias = parts[0];
-				} else if (cfg.sshHost !== PLACEHOLDER) {
-					// 无参数：用配置里现成的别名整备
-					alias = cfg.sshHost;
-				}
-				if (!alias && !host) {
-					notify(
-						["用法：/rl setup <服务器IP> <用户名> [别名]", "或：/rl setup <已配置的别名>（只补缺）"].join("\n"),
-						"warning",
-					);
+				if (ctx.mode !== "tui") {
+					notify("/rl setup 是交互式向导，需要 TUI 模式（当前不是）", "warning");
 					return;
 				}
-				const report = await setup({
-					host,
-					user,
-					alias,
-					runsPath: cfg.runsPath === PLACEHOLDER ? undefined : cfg.runsPath,
+				const report = await runSetup({
+					ask: (title, placeholder) => ctx.ui.input(title, placeholder),
+					confirm: (title, message) => ctx.ui.confirm(title, message),
 				});
+				cfg = loadConfig();
 				notify(report.lines.join("\n"), report.needsAttention ? "warning" : "info");
 				return;
 			}

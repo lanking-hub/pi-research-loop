@@ -54,37 +54,35 @@ AGENTS.md                   agent 规则
 > 两个目录是**分层**不是冗余：`.pi/` 是 pi 的平台目录（含机器相关的 ssh 配置，别进 git），
 > `.auto/` 是你的内容目录（goal/notes 要进 git、跨机器同步）。
 
-## 5. 一键配好 ssh 和服务器
+## 5. 一键整备（交互式）
 
 ```bash
-/rl setup <服务器IP或域名> <用户名> [别名]
+/rl setup
 ```
 
-别名缺省是 `research-server`。它会**断点续跑**——每一步幂等，卡在哪就重跑到哪：
+**一步步问你**：服务器地址 → 登录用户名 → ssh 别名（默认 `research-server`）→ 服务器上 runs 目录 → 服务器上项目目录。
+
+问完自动做完：
 
 1. 检查 ssh 程序
-2. 没有钥匙对就生成一把（ed25519，**无密码**，自动化需要）
+2. 没有钥匙对就生成一把（ed25519，**无密码**，免密登录需要）
 3. 把 `Host <别名>` 写进 `~/.ssh/config`
 4. `ssh-keyscan` 登记服务器指纹（避开首连交互确认——`BatchMode` 答不了）
 5. 试着免密连一次
 6. 连上后：修 `~/.ssh` 权限、建 `~/bin`、上传并赋权两个管理脚本、建 runs 目录
+7. **把 4 个配置值写进 `.pi/research-loop.json`**——不用手填
 
-**唯一需要你动手的一步**：公钥还没装到服务器时，它会打印一条命令让你执行（输**最后一次**服务器密码）：
+**唯一需要你动手的一步**：公钥装到服务器（要输一次服务器密码）。向导会打印命令并**在原地等你确认**：
 
 ```
 type "C:\Users\<你>\.ssh\id_ed25519.pub" | ssh <用户>@<服务器> "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
 ```
 
-装完重跑 `/rl setup`，会自动继续剩下的步骤。
+**另开一个终端**执行完，回来选 Yes，向导继续往下做。**不用重跑 `/rl setup`**。
 
-其他用法：
+（万一被中断：每一步都幂等，重跑会跳过已完成的。）
 
-```bash
-/rl setup <别名>     # 只给已存在的别名「补缺」
-/rl setup            # 对配置里已填的 sshHost 补缺
-```
-
-> **无密码私钥**：`/rl setup` 生成的钥匙没有密码（免密登录的前提）。别外传、别提交进 git。
+> **无密码私钥**：生成的钥匙没有密码（免密登录的前提）。别外传、别提交进 git。
 
 服务器没装 `gpustat` 的话，把配置里的 `gpuCommand` 换成：
 
@@ -92,22 +90,7 @@ type "C:\Users\<你>\.ssh\id_ed25519.pub" | ssh <用户>@<服务器> "mkdir -p ~
 nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv
 ```
 
-## 6. 填配置
-
-`.pi/research-loop.json` 里 4 个 `TODO`：
-
-```json
-{
-  "sshHost": "research-server",
-  "runsPath": "/home/<你>/runs",
-  "statusCommand": "RUNS_DIR=/home/<你>/runs /home/<你>/bin/run_status.sh",
-  "startCommand": "RUNS_DIR=/home/<你>/runs PROJECT_DIR=/home/<你>/<项目> /home/<你>/bin/run_exp.sh"
-}
-```
-
-`sshHost` 填第 5 步的别名。
-
-## 7. 自查
+## 6. 自查
 
 ```bash
 /rl doctor
@@ -115,13 +98,13 @@ nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=c
 
 逐项实测：配置字段 / ssh 免密连通 / runs 目录 / statusCommand / gpuCommand / 项目文件。全绿再下一步。
 
-## 8. 写方向
+## 7. 写方向
 
 `.auto/goal.md` 里写：方法、目标、看哪些指标（每个是越大越好还是越小越好）、大致方向、并发上限。
 
 **这一步只能你写**，扩展替不了。
 
-## 9. 启动
+## 8. 启动
 
 ```bash
 /rl start

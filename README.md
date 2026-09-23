@@ -40,80 +40,62 @@ pi install git:github.com/<你>/pi-research-loop
 
 ## 快速开始
 
-### 1. 配 ssh 免密
+### 1. 进项目目录，生成文件
 
-`~/.ssh/config`：
-
-```
-Host gpu-server
-    HostName <服务器地址>
-    User <用户名>
-    IdentityFile ~/.ssh/<你的 key>
-    ControlMaster auto
-    ControlPath ~/.ssh/cm-%r@%h:%p
-    ControlPersist 10m
-```
-
-**必须免密**（扩展用 `BatchMode=yes`，不会也不该碰密码）。`ControlMaster` 不是必需，但能省掉每次轮询的握手开销。
-
-### 2. 部署服务器脚本
-
-把 `server/` 下的两个脚本放到服务器上并加执行权限：
-
-```bash
-scp server/*.sh gpu-server:~/bin/
-ssh gpu-server 'chmod +x ~/bin/run_exp.sh ~/bin/run_status.sh'
-```
-
-### 3. 写配置
-
-把 `templates/research-loop.json` 拷到 `~/.pi/agent/research-loop.json`（全局）或 `<项目>/.pi/research-loop.json`（项目级，覆盖全局），填上：
-
-```json
-{
-  "sshHost": "gpu-server",
-  "runsPath": "/home/me/runs",
-  "statusCommand": "RUNS_DIR=/home/me/runs /home/me/bin/run_status.sh",
-  "startCommand": "RUNS_DIR=/home/me/runs PROJECT_DIR=/home/me/proj /home/me/bin/run_exp.sh",
-  "gpuCommand": "gpustat --no-color"
-}
-```
-
-### 4. 初始化项目文件
-
-在**你的项目目录**里跑（pi 的文件都跟着当前目录走）：
+pi 的文件都跟着当前目录走，所以先建个「控制台目录」（代码不用放本地）：
 
 ```bash
 cd ~/research && pi
 /rl init
 ```
 
-会生成：
-
 | 生成的文件 | 用途 |
 |---|---|
-| `AGENTS.md` | agent 规则（已有就跳过，不覆盖——pi 会叠加加载多份，你手动追加即可） |
+| `AGENTS.md` | agent 规则（已有就跳过，不覆盖） |
 | `.auto/goal.md` | **你写**：方法、目标、看哪些指标、大致方向 |
 | `.auto/notes.md` | agent 写：每轮重写，含死胡同 |
-| `.pi/research-loop.json` | 项目级配置（覆盖全局），里面 4 个 TODO 要填 |
+| `.pi/research-loop.json` | 项目级配置——**下一步由 `/rl setup` 自动填，不用手改** |
 
-生成完要 `/reload`，新 `AGENTS.md` 才会被加载。
+### 2. 一键整备
 
-### 5. 跑
+```bash
+/rl setup
+```
 
-重启 pi（`/reload` 也行），然后：
+**交互式向导，一步步问**：服务器地址 → 用户名 → ssh 别名 → runs 目录 → 服务器上项目路径。
+
+问完自动做完：生成钥匙对 → 写 `~/.ssh/config` 别名 → 登记指纹 → 建 `~/bin` 并上传管理脚本 → 建 runs 目录 → **把 4 个配置值写进 `.pi/research-loop.json`**。
+
+唯一要你动手的一步：**把公钥装到服务器**（要输一次服务器密码）。向导会打印命令并**在原地等你确认**，装完选 Yes 就继续——**不用重跑 setup**。
+
+### 3. 体检
+
+```bash
+/reload       # 让新生成的 AGENTS.md 生效
+/rl doctor    # 逐项实测：ssh、目录、脚本、配置、项目文件
+```
+
+### 4. 写方向，开跑
+
+`.auto/goal.md` 里写：方法、目标、看哪些指标、大致方向、并发上限。然后：
+
+```bash
+/rl start
+```
+
+跟着直接跟 agent 说要做什么，它会起第一个实验，之后自动循环。
+
+### 命令一览
 
 ```bash
 /rl init      # 生成项目文件（首次）
-/rl setup     # 从零配好 ssh（生成钥匙、写别名、登记指纹、传服务器脚本）；每步幂等，可反复跑
-/rl doctor    # 逐项实测环境，告诉你还差什么
-/rl status    # 看状态
+/rl setup     # 交互式向导：ssh + 服务器 + 配置，一次搞完
+/rl doctor    # 逐项实测，告诉你还差什么
+/rl status    # 看轮询状态
 /rl start     # 启动轮询
 /rl stop      # 停
 /rl poll      # 立刻查一次
 ```
-
-然后直接跟 agent 说你要做什么，它会起第一个实验，之后就是自动循环了。
 
 ### 首次配置：用 `/rl doctor` 自查
 
@@ -217,9 +199,10 @@ pi install git:github.com/<you>/pi-research-loop
 1. **SSH**: add a passwordless `Host` entry in `~/.ssh/config`.
 2. **Server**: copy `server/*.sh` to the server, `chmod +x`.
 3. **Config**: copy `templates/research-loop.json` to `~/.pi/agent/research-loop.json`, fill in `sshHost` / `runsPath` / `statusCommand` / `startCommand`.
-4. **Init**: `cd <your-project> && pi`, then `/rl init` — generates `AGENTS.md`, `.auto/goal.md`, `.auto/notes.md`, `.pi/research-loop.json`. Then `/reload`.
-5. **Verify**: run `/rl doctor` — it checks ssh, paths, scripts and project files and tells you what's still missing.
-6. **Run**: `/rl start`.
+4. **Init**: `cd <your-project> && pi`, then `/rl init` — generates `AGENTS.md`, `.auto/goal.md`, `.auto/notes.md`, `.pi/research-loop.json`.
+5. **Set up**: run `/rl setup` — an interactive wizard that asks for server address, user, alias, runs dir and project dir, then generates keys, writes the ssh alias, registers the host key, uploads the scripts and **writes the config for you**. The only manual step (installing your public key, which needs your password once) is handled inline — it waits for your confirmation rather than making you re-run.
+6. **Verify**: `/reload`, then `/rl doctor`.
+7. **Run**: `/rl start`.
 
 Key design: **the extension only polls and wakes — it never judges.** Polling is plain `ssh` (zero tokens); only the wake-up costs a model call. The `DONE` file is the only contract between your experiments and the extension, and its contents are never parsed — so you don't need a fixed metric schema.
 
