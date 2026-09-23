@@ -8,18 +8,16 @@
  * 它刻意不判定任何事：不认识指标、不做 keep/discard、不决定下一步做什么。
  * 领域规则全部在 AGENTS.md（见 templates/）里，由人维护。
  *
- * 命令：
- *   /rl status   查看状态
- *   /rl start    启动轮询
- *   /rl stop     停止轮询
- *   /rl poll     立刻轮询一次
- *   /rl init     把 templates/ 生成到当前项目（已存在的文件不覆盖）
- *   /rl doctor   逐项实测环境，告诉你还差什么（只读体检）
- *   /rl setup    从零到可用的交互式向导：一步步问服务器地址/用户名/别名/
- *                runs 目录/项目路径，然后生成钥匙对、写 ssh 别名、登记指纹、
- *                传服务器脚本、建目录、**并自动写入配置**。
- *                唯一人工环节（装公钥）会在向导内暂停等你确认，不需要重跑。
- *                每步幂等，半途失败后重跑是安全的。
+ * 命令（默认动作 = 开始循环）：
+ *   /rl            开始循环（已在跑则显示状态）
+ *   /rl stop       停止
+ *   /rl status     看状态
+ *   /rl goal <文本> 往 .auto/goal.md 的「临时建议」加一条，下一轮自动生效
+ *   /rl doctor     逐项实测环境，告诉你还差什么（只读体检）
+ *   /rl setup      首次一站式：生成项目文件（AGENTS.md / goal / notes / runs.txt）
+ *                  + 交互式配 ssh（生成钥匙、写别名、登记指纹、传脚本、写配置）
+ *                  唯一人工环节（装公钥）会在向导内暂停等你确认，不用重跑。
+ *                  每步幂等，半途失败后重跑是安全的。
  *
  * 配置：~/.pi/agent/research-loop.json（全局）或 <项目>/.pi/research-loop.json（项目级）
  *
@@ -462,12 +460,9 @@ function installAgentsRules(tplDir: string): string {
  * 把包里 templates/ 的模板生成到当前项目目录，省掉手动拷贝。
  * 其他文件已存在就跳过（不覆盖你的内容）；AGENTS.md 例外，见上。
  */
-function init(): void {
+function ensureProjectFiles(): string[] {
 	const tplDir = templatesDir();
-	if (!existsSync(tplDir)) {
-		notify(`找不到模板目录：${tplDir}`, "error");
-		return;
-	}
+	if (!existsSync(tplDir)) return [`✗ 找不到模板目录：${tplDir}`];
 
 	const cwd = process.cwd();
 	const targets = [
@@ -498,14 +493,40 @@ function init(): void {
 		}
 	}
 
-	lines.push("");
-	lines.push("下一步：");
-	lines.push("1. 填 .pi/research-loop.json 里的 sshHost");
-	lines.push("2. 填 .auto/goal.md（方向、指标、并发上限）");
-	lines.push("3. /reload（AGENTS.md 要重新加载才生效）");
-	lines.push("4. /rl doctor 自查");
+	return lines;
+}
 
-	notify(lines.join("\n"), "info");
+/**
+ * /rl goal —— 直接往 .auto/goal.md 的「临时建议」里加一条。
+ * 省得手动开文件改；下一轮 agent 会自动读到。
+ */
+function addGoal(text: string): string {
+	const HEADING = "## 临时建议";
+	const p = join(process.cwd(), ".auto", "goal.md");
+
+	let cur = "";
+	if (existsSync(p)) {
+		cur = readFileSync(p, "utf8");
+	} else {
+		const tpl = join(templatesDir(), "goal.md");
+		cur = existsSync(tpl) ? readFileSync(tpl, "utf8") : "# Goal\n";
+	}
+
+	const line = `- ${text}`;
+	const idx = cur.indexOf(HEADING);
+	let out: string;
+	if (idx === -1) {
+		out = `${cur.replace(/\s+$/, "")}\n\n${HEADING}\n\n${line}\n`;
+	} else {
+		const restStart = idx + HEADING.length;
+		const nextHeading = cur.indexOf("\n## ", restStart);
+		const insertAt = nextHeading === -1 ? cur.length : nextHeading;
+		out = `${cur.slice(0, insertAt).replace(/\s+$/, "")}\n${line}\n${cur.slice(insertAt)}`;
+	}
+
+	mkdirSync(dirname(p), { recursive: true });
+	writeFileSync(p, out);
+	return `已写进 .auto/goal.md 的「${HEADING}」：\n  ${line}\n\n下一轮 agent 会自动读到。`;
 }
 
 /**
@@ -552,50 +573,50 @@ function stopPolling(): void {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("rl", {
-		description: "research-loop: status / start / stop / poll / init / doctor",
+		description: "research-loop：开始循环（默认） / stop / status / goal / doctor / setup",
 		handler: async (args, ctx) => {
 			lastCtx = ctx;
 			cfg = loadConfig();
 			const a = args.trim();
 
-			if (!a || a === "status") {
-				notify(`${polling ? "轮询中" : "已停止"} — ${lastStatus}（间隔 ${cfg.pollIntervalSec}s）`, "info");
-				return;
-			}
-
-			if (a === "stop" || a === "off") {
-				stopPolling();
-				notify("research-loop 已停止", "info");
-				return;
-			}
-
-			if (a === "start") {
+			// 默认动作 = 开始循环（最常做的那件事）
+			if (!a || a === "start" || a === "on") {
+				if (polling) {
+					notify(`循环运行中 — ${lastStatus}（每 ${cfg.pollIntervalSec}s 盯一次）`, "info");
+					return;
+				}
 				if (!isConfigured(cfg)) {
 					notify(
 						cfg.mode === "dir"
 							? "配置未完成，先填 sshHost / runsPath / statusCommand"
-							: "配置未完成，先填 sshHost",
+							: "配置未完成，先填 sshHost（没配过就跑 /rl setup）",
 						"warning",
 					);
 					return;
 				}
 				await startPolling(pi);
-				notify("research-loop 已启动", "info");
+				notify(`循环已开始 — 每 ${cfg.pollIntervalSec}s 盯一次实验，有结果就叫醒 agent。/rl stop 停止`, "info");
 				return;
 			}
 
-			if (a === "poll") {
-				if (!isConfigured(cfg)) {
-					notify("配置未完成", "warning");
+			if (a === "stop" || a === "off") {
+				stopPolling();
+				notify("循环已停止", "info");
+				return;
+			}
+
+			if (a === "status") {
+				notify(`${polling ? "循环运行中" : "已停止"} — ${lastStatus}（每 ${cfg.pollIntervalSec}s 盯一次）`, "info");
+				return;
+			}
+
+			if (a === "goal" || a.startsWith("goal ")) {
+				const text = a.slice("goal".length).trim();
+				if (!text) {
+					notify("用法：/rl goal <想让 agent 知道的方向或建议>", "warning");
 					return;
 				}
-				await poll(pi);
-				notify(lastStatus, "info");
-				return;
-			}
-
-			if (a === "init") {
-				init();
+				notify(addGoal(text), "info");
 				return;
 			}
 
@@ -604,21 +625,28 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			if (a.startsWith("setup")) {
+			if (a === "setup") {
 				if (ctx.mode !== "tui") {
 					notify("/rl setup 是交互式向导，需要 TUI 模式（当前不是）", "warning");
 					return;
 				}
+				// 一站式：先生成/补齐项目文件，再配 ssh 和服务器
+				const fileLines = ensureProjectFiles();
 				const report = await runSetup({
 					ask: (title, placeholder) => ctx.ui.input(title, placeholder),
 					confirm: (title, message) => ctx.ui.confirm(title, message),
 				});
 				cfg = loadConfig();
-				notify(report.lines.join("\n"), report.needsAttention ? "warning" : "info");
+				notify(
+					[...fileLines, "", ...report.lines, "", "最后：/reload（AGENTS.md 要重新加载），然后 /rl 开始循环"].join(
+						"\n",
+					),
+					report.needsAttention ? "warning" : "info",
+				);
 				return;
 			}
 
-			notify("用法：/rl [status|start|stop|poll|init|doctor|setup]", "warning");
+			notify("用法：/rl（开始循环） | /rl stop | /rl status | /rl goal <文本> | /rl doctor | /rl setup", "warning");
 		},
 	});
 

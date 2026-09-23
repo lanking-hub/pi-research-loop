@@ -110,14 +110,15 @@ cd ~/research && pi
 ### 命令一览
 
 ```bash
-/rl init      # 生成项目文件（首次）
-/rl setup     # 交互式向导：ssh + 服务器 + 配置，一次搞完
-/rl doctor    # 逐项实测，告诉你还差什么
-/rl status    # 看轮询状态
-/rl start     # 启动轮询
-/rl stop      # 停
-/rl poll      # 立刻查一次
+/rl               开始循环（默认动作；已在跑则显示状态）
+/rl stop          停止
+/rl status        看状态
+/rl goal <文本>    往 .auto/goal.md 加一条建议，下一轮自动生效
+/rl doctor        环境体检（只读）
+/rl setup         首次一站式：生成项目文件 + 配 ssh + 写配置
 ```
+
+`setup` 已经包含了原来 `init` 做的事，不用分开跑。
 
 ### 首次配置：用 `/rl doctor` 自查
 
