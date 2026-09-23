@@ -14,7 +14,11 @@
  *   /rl stop     停止轮询
  *   /rl poll     立刻轮询一次
  *   /rl init     把 templates/ 生成到当前项目（已存在的文件不覆盖）
- *   /rl doctor   逐项实测环境，告诉你还差什么（首次配置时用这个）
+ *   /rl doctor   逐项实测环境，告诉你还差什么（只读体检）
+ *   /rl setup <IP> <用户名> [别名]
+ *                从零到可用的配置向导：生成钥匙对、写 ssh 别名、登记指纹、
+ *                传服务器脚本、建目录。每步幂等，卡在哪重跑到哪；唯一人工
+ *                环节（装公钥）会打印按平台给好的命令。
  *
  * 配置：~/.pi/agent/research-loop.json（全局）或 <项目>/.pi/research-loop.json（项目级）
  *
@@ -32,6 +36,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { isConfigured, loadConfig, PLACEHOLDER, type Config } from "../lib/config.ts";
 import { runSsh } from "../lib/ssh.ts";
+import { setup } from "../lib/setup.ts";
 
 type RunState = "RUNNING" | "DONE" | "CRASHED" | "STALLED" | "UNKNOWN";
 
@@ -376,7 +381,41 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			notify("用法：/rl [status|start|stop|poll|init|doctor]", "warning");
+			if (a.startsWith("setup")) {
+				const rest = a.slice("setup".length).trim();
+				const parts = rest.split(/\s+/).filter(Boolean);
+				let host: string | undefined;
+				let user: string | undefined;
+				let alias: string | undefined;
+				if (parts.length >= 2) {
+					host = parts[0];
+					user = parts[1];
+					alias = parts[2];
+				} else if (parts.length === 1) {
+					// 只给别名：对该别名做「只补缺」整备
+					alias = parts[0];
+				} else if (cfg.sshHost !== PLACEHOLDER) {
+					// 无参数：用配置里现成的别名整备
+					alias = cfg.sshHost;
+				}
+				if (!alias && !host) {
+					notify(
+						["用法：/rl setup <服务器IP> <用户名> [别名]", "或：/rl setup <已配置的别名>（只补缺）"].join("\n"),
+						"warning",
+					);
+					return;
+				}
+				const report = await setup({
+					host,
+					user,
+					alias,
+					runsPath: cfg.runsPath === PLACEHOLDER ? undefined : cfg.runsPath,
+				});
+				notify(report.lines.join("\n"), report.needsAttention ? "warning" : "info");
+				return;
+			}
+
+			notify("用法：/rl [status|start|stop|poll|init|doctor|setup]", "warning");
 		},
 	});
 
@@ -385,6 +424,7 @@ export default function (pi: ExtensionAPI) {
 		label: "GPU Status",
 		description: "查询远程 GPU 服务器的显卡占用情况。起实验前必须先查，选空闲卡。",
 		promptSnippet: "查询远程服务器 GPU 占用",
+		promptGuidelines: ["连服务器一律走 ~/.ssh/config 里配置好的别名（原生 ssh），禁止 wsl ssh / 裸 IP"],
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
 			cfg = loadConfig();
@@ -411,6 +451,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"起实验前先用 gpu_status 查空闲卡，把空闲的卡号传给 start_run 的 gpu 参数",
 			"不要用 ssh + nohup 直接起实验，必须走 start_run",
+			"连服务器一律走 ~/.ssh/config 里配置好的别名（原生 ssh），禁止 wsl ssh / 裸 IP",
 		],
 		parameters: Type.Object({
 			gpu: Type.String({ description: 'CUDA_VISIBLE_DEVICES，例如 "0" 或 "0,1"' }),

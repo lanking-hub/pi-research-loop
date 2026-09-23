@@ -28,10 +28,18 @@
 ## 服务器与实验
 
 - **起实验必须用 `start_run` 工具**，禁止直接 `ssh ... nohup python ...`（否则 run 不在管理内，永远不会被轮询到）
-- 起实验前先调 `gpu_status` 查实时空闲卡，把空闲卡号传给 `start_run`
+- 起实验前先调 `gpu_status` 查实时空闲卡，把空闲的卡号传给 start_run
 - **并发上限见 `.auto/goal.md`**（多人共用的服务器务必设上限，不要占满）
 - 不动别人的进程、文件、环境
 - 实验结果读 `runs/<id>/DONE` 和 `runs/<id>/log.txt`
+
+### SSH 使用纪律（排查问题必读）
+
+- 排查服务器问题**可以自由使用 ssh**（看日志、查进程、kill、nvidia-smi……），但**必须走正门**：
+  `ssh <配置别名> '<任意命令>'`（原生 ssh + `~/.ssh/config` 里配好的别名，即配置文件中的 sshHost）
+- **禁止 `wsl ssh`**（Windows 的 WSL 是另一套没配置的环境：独立的钥匙和指纹记录，会卡在指纹确认/缺钥匙）
+- **禁止 `ssh 用户@裸IP`**（绕过别名配置，同样会卡交互确认）
+- 不确定别名时看 `.pi/research-loop.json` 里的 `sshHost` 字段
 
 ## 代码管理
 

@@ -105,7 +105,8 @@ cd ~/research && pi
 
 ```bash
 /rl init      # 生成项目文件（首次）
-/rl doctor    # 先跑这个：逐项实测环境，告诉你还差什么
+/rl setup     # 从零配好 ssh（生成钥匙、写别名、登记指纹、传服务器脚本）；每步幂等，可反复跑
+/rl doctor    # 逐项实测环境，告诉你还差什么
 /rl status    # 看状态
 /rl start     # 启动轮询
 /rl stop      # 停
