@@ -10,9 +10,46 @@ export function sshBin(): string {
 	return process.platform === "win32" ? "ssh.exe" : "ssh";
 }
 
-/** 取远程服务器上该用户的 home 目录 */
+/**
+ * 本地模式的标记值：pi 就装在跑实验的那台机器上，不需要 ssh。
+ * 在配置里写 `"sshHost": "local"` 启用。
+ */
+export const LOCAL_HOST = "local";
+
+export function isLocal(host: string | undefined): boolean {
+	return !host || host === LOCAL_HOST;
+}
+
+/** 在本机执行一条命令（本地模式用） */
+export function runLocal(cmd: string, timeoutSec = 15): Promise<SshResult> {
+	return new Promise((resolve) => {
+		execFile(
+			process.platform === "win32" ? "cmd.exe" : "/bin/sh",
+			[process.platform === "win32" ? "/c" : "-c", cmd],
+			{ timeout: (timeoutSec + 15) * 1000, windowsHide: true },
+			(error, stdout, stderr) => {
+				resolve({ ok: !error, out: String(stdout ?? ""), err: String(stderr ?? "") });
+			},
+		);
+	});
+}
+
+/**
+ * 统一入口：根据 host 决定走 ssh 还是本地执行。
+ * 整个项目只有这一个地方需要区分，其他代码一律调它。
+ */
+export function runRemote(
+	host: string | undefined,
+	cmd: string,
+	timeoutSec = 15,
+): Promise<SshResult> {
+	if (isLocal(host)) return runLocal(cmd, timeoutSec);
+	return runSsh(host as string, cmd, timeoutSec);
+}
+
+/** 取目标机器上该用户的 home 目录 */
 export async function remoteHome(host: string, timeoutSec = 15): Promise<string | undefined> {
-	const res = await runSsh(host, "echo $HOME", timeoutSec);
+	const res = await runRemote(host, "echo $HOME", timeoutSec);
 	const home = res.out.trim();
 	return home ? home : undefined;
 }

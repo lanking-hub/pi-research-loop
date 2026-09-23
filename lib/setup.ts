@@ -20,7 +20,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_NAME, loadConfig, SSH_ALIAS, type Config } from "./config.ts";
 import { serverDir } from "./paths.ts";
-import { expandRemotePath, remoteHome, runSsh, sshBin } from "./ssh.ts";
+import { expandRemotePath, isLocal, remoteHome, runLocal, runRemote, sshBin } from "./ssh.ts";
 
 const IS_WIN = process.platform === "win32";
 const scpBin = IS_WIN ? "scp.exe" : "scp";
@@ -141,6 +141,22 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 
 	const cfg = loadConfig();
 
+	// ── 0. 本地模式：pi 就装在跑实验的机器上，整个 ssh 环节跳过 ──
+	// 用配置 "sshHost": "local" 启用。大多数人用不到，但成本很低。
+	if (isLocal(cfg.sshHost)) {
+		const probe = await runLocal("echo __RL_OK__", 10);
+		if (!probe.ok || !probe.out.includes("__RL_OK__")) {
+			lines.push("✗ 本地模式，但命令执行不了");
+			lines.push(`  ${(probe.err.trim() || probe.out.trim() || "(无输出)").slice(0, 200)}`);
+			return { lines, done: false, needsAttention: true };
+		}
+		lines.push("✓ 本地模式：命令直接在本机执行，不需要 ssh");
+		if (IS_WIN) lines.push("  （Windows 下走 cmd.exe）");
+		lines.push("");
+		lines.push("不需要任何配置文件。下一步：/reload，然后 /rl 开始循环。");
+		return { lines, done: true, needsAttention: false };
+	}
+
 	// ── 1. ssh 程序 ────────────────────────────────────────
 	const ver = await exec(sshBin(), ["-V"], 8000);
 	if (!(ver.out + ver.err).includes("OpenSSH")) {
@@ -214,7 +230,7 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	// ── 5. 指纹登记 + 免密连通（卡住就在这里等，不要求重跑）──
 	let connected = false;
 	for (let attempt = 1; attempt <= MAX_KEY_ATTEMPTS; attempt++) {
-		let probe = await runSsh(alias, "echo __RL_OK__", 10);
+		let probe = await runRemote(alias, "echo __RL_OK__", 10);
 		if (probe.ok && probe.out.includes("__RL_OK__")) {
 			connected = true;
 			break;
@@ -225,7 +241,7 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		if (scan.ok && scan.out.trim()) {
 			appendFileSync(join(sshDir(), "known_hosts"), scan.out.endsWith("\n") ? scan.out : `${scan.out}\n`);
 			lines.push("✓ 已登记服务器指纹（known_hosts）");
-			probe = await runSsh(alias, "echo __RL_OK__", 10);
+			probe = await runRemote(alias, "echo __RL_OK__", 10);
 			if (probe.ok && probe.out.includes("__RL_OK__")) {
 				connected = true;
 				break;
@@ -256,7 +272,7 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	}
 	lines.push(`✓ 免密连通：ssh ${alias}`);
 
-	await runSsh(alias, "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys", 10);
+	await runRemote(alias, "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys", 10);
 	lines.push("✓ 服务器端 ssh 权限已确认（700/600）");
 
 	// ── 6. table 模式到此为止 ──────────────────────────────
@@ -275,7 +291,7 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	}
 
 	// ── 以下只有 dir 模式才会走到 ──────────────────────────
-	const binDir = await runSsh(alias, `mkdir -p ${REMOTE_BIN} && echo ok`, 10);
+	const binDir = await runRemote(alias, `mkdir -p ${REMOTE_BIN} && echo ok`, 10);
 	if (!binDir.ok) {
 		problems += 1;
 		attention = true;
@@ -290,7 +306,7 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 			}
 			const up = await exec(scpBin, [src, `${alias}:bin/${script}`], 60000);
 			if (up.ok) {
-				await runSsh(alias, `chmod +x ${REMOTE_BIN}/${script}`, 10);
+				await runRemote(alias, `chmod +x ${REMOTE_BIN}/${script}`, 10);
 				uploaded += 1;
 			} else {
 				problems += 1;
@@ -306,7 +322,7 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	const runsPath = expandRemotePath(runsRaw, home);
 	if (runsPath !== runsRaw) lines.push(`  （${runsRaw} → ${runsPath}）`);
 
-	const mk = await runSsh(alias, `mkdir -p ${JSON.stringify(runsPath)} && echo ok`, 10);
+	const mk = await runRemote(alias, `mkdir -p ${JSON.stringify(runsPath)} && echo ok`, 10);
 	if (mk.ok) {
 		lines.push(`✓ runs 目录就绪：${runsPath}`);
 	} else {

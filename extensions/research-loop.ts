@@ -39,7 +39,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { isConfigured, loadConfig, PLACEHOLDER, SSH_ALIAS, type Config } from "../lib/config.ts";
 import { templatesDir } from "../lib/paths.ts";
-import { expandRemotePath, remoteHome, runSsh } from "../lib/ssh.ts";
+import { expandRemotePath, remoteHome, runRemote } from "../lib/ssh.ts";
 import { runSetup } from "../lib/setup.ts";
 import { forget, loadState, markHandled, touch, type RunWatch } from "../lib/state.ts";
 
@@ -201,7 +201,7 @@ async function remoteRunState(entry: TableEntry): Promise<TableState> {
 	const cmd = hasPid
 		? `test -f ${done} && echo DONE || { kill -0 ${entry.pid} 2>/dev/null && echo RUNNING || echo CRASHED; }`
 		: `test -f ${done} && echo DONE || echo NOPID`;
-	const res = await runSsh(cfg.sshHost, cmd, cfg.sshTimeoutSec);
+	const res = await runRemote(cfg.sshHost, cmd, cfg.sshTimeoutSec);
 	const out = res.out.trim();
 	if (out === "DONE" || out === "RUNNING" || out === "CRASHED" || out === "NOPID") return out;
 	return "UNKNOWN";
@@ -276,7 +276,7 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 
 /** dir 模式：固定 runs 目录 + 服务器脚本（baseline 那种死流程用） */
 async function pollDir(pi: ExtensionAPI): Promise<void> {
-	const res = await runSsh(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
+	const res = await runRemote(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
 	if (!res.ok) {
 		handleSshFailure(pi, res);
 		return;
@@ -355,7 +355,7 @@ async function doctor(): Promise<void> {
 	} else {
 		lines.push("✓ 配置字段已填");
 
-		const ping = await runSsh(cfg.sshHost, "echo ok", cfg.sshTimeoutSec);
+		const ping = await runRemote(cfg.sshHost, "echo ok", cfg.sshTimeoutSec);
 		if (ping.ok && ping.out.trim().startsWith("ok")) {
 			lines.push(`✓ ssh 免密连通：${cfg.sshHost}`);
 		} else {
@@ -369,7 +369,7 @@ async function doctor(): Promise<void> {
 			// ~/ 在带引号的命令里不会被 shell 展开，先自己展开再查
 			const home = await remoteHome(cfg.sshHost, cfg.sshTimeoutSec);
 			const runsAbs = expandRemotePath(cfg.runsPath, home);
-			const dir = await runSsh(
+			const dir = await runRemote(
 				cfg.sshHost,
 				`test -d ${JSON.stringify(runsAbs)} && echo yes || echo no`,
 				cfg.sshTimeoutSec,
@@ -383,7 +383,7 @@ async function doctor(): Promise<void> {
 				lines.push(`  （配置里写的是 ${cfg.runsPath}；带引号时 ~ 不会展开，建议直接写绝对路径）`);
 			}
 
-			const st = await runSsh(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
+			const st = await runRemote(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
 			if (!st.ok) {
 				problems += 1;
 				lines.push("✗ statusCommand 执行失败");
@@ -545,7 +545,7 @@ function addGoal(text: string): string {
  */
 async function primeHandled(): Promise<void> {
 	if (cfg.mode === "dir") {
-		const res = await runSsh(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
+		const res = await runRemote(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
 		if (!res.ok) return;
 		for (const r of parseStatus(res.out)) {
 			if (r.state !== "RUNNING") markHandled(watch, r.id);
@@ -756,7 +756,7 @@ export default function (pi: ExtensionAPI) {
 			// 命令用 base64 传递，绕开所有 shell 引号问题
 			const b64 = Buffer.from(params.cmd, "utf8").toString("base64");
 			const remote = `${cfg.startCommand} --gpu '${params.gpu}' --cmd-b64 '${b64}'`;
-			const res = await runSsh(cfg.sshHost, remote, cfg.sshTimeoutSec);
+			const res = await runRemote(cfg.sshHost, remote, cfg.sshTimeoutSec);
 			const text = res.ok
 				? `已起 run：${res.out.trim() || "(无输出)"}`
 				: `起实验失败：${res.err.trim() || res.out.trim() || "(无输出)"}`;
