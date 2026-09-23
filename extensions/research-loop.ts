@@ -87,7 +87,6 @@ function parseStatus(out: string): RunStatus[] {
 
 let cfg: Config = loadConfig();
 let timer: ReturnType<typeof setInterval> | undefined;
-let polling = false;
 let watch: RunWatch = loadState();
 let pending: PendingItem[] = [];
 let escalatedOnce = new Set<string>();
@@ -95,6 +94,26 @@ let sshFailCount = 0;
 let lastWakeAt = 0;
 let lastCtx: ExtensionContext | undefined;
 let lastStatus = "尚未轮询";
+/** poll 重入保护：ssh 慢的时候上一轮还没回来，下一轮别叠上来 */
+let pollInFlight = false;
+
+/**
+ * 是否在跑。**以 timer 为唯一真相**，不用单独的 bool 标志。
+ *
+ * 以前标志在启动流程前半段就置真，后半段（预检 ssh）一旦失败/抛异常，
+ * 就留下「标志说在跑、但定时器没建起来」的僵尸状态：
+ * 再 /rl start 只会打印状态、什么都不做，必须 /rl stop 才好。
+ */
+function isRunning(): boolean {
+	return timer !== undefined;
+}
+
+/** 往待唤醒队列塞一项。同一个 key 不重复塞——
+ *  合并窗口内没唤醒时，下一轮轮询会再遇到同一个 run，不去重就会报两遍。 */
+function enqueue(item: PendingItem): void {
+	if (pending.some((p) => p.key === item.key)) return;
+	pending.push(item);
+}
 
 function notify(msg: string, level: "info" | "warning" | "error" = "info"): void {
 	try {
@@ -107,7 +126,7 @@ function notify(msg: string, level: "info" | "warning" | "error" = "info"): void
 /** status 分两行写清楚：上面是扩展自身，下面是实验。别混在一条字符串里。 */
 function statusText(): string {
 	return [
-		`循环：${polling ? "运行中" : "已停止"}（每 ${cfg.pollIntervalSec}s 盯一次实验）`,
+		`循环：${isRunning() ? "运行中" : "已停止"}（每 ${cfg.pollIntervalSec}s 盯一次实验）`,
 		`实验：${lastStatus}`,
 	].join("\n");
 }
@@ -237,12 +256,12 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 		sshFailCount = 0;
 
 		if (st === "DONE") {
-			pending.push({ key: e.path, lines: [`- 完成：${e.path}`, `  读 ${e.path}/DONE 看结果。`] });
+			enqueue({ key: e.path, lines: [`- 完成：${e.path}`, `  读 ${e.path}/DONE 看结果。`] });
 			continue;
 		}
 
 		if (st === "CRASHED") {
-			pending.push({
+			enqueue({
 				key: e.path,
 				lines: [
 					`- 崩溃：${e.path}`,
@@ -257,7 +276,7 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 		const started = touch(watch, e.path);
 		const hours = (Date.now() - started) / 3600000;
 		if (hours > cfg.maxHours) {
-			pending.push({
+			enqueue({
 				key: e.path,
 				lines: [
 					`- 超时：${e.path}`,
@@ -312,7 +331,7 @@ async function pollDir(pi: ExtensionAPI): Promise<void> {
 					: r.state === "STALLED"
 						? [`- ${r.id}：疑似卡死（日志长时间未更新）。检查后决定杀掉还是继续等。`]
 						: [`- ${r.id}：状态未知。请自行 ssh 到 ${cfg.sshHost} 检查 ${dir}。`];
-		pending.push({ key: r.id, lines: text });
+		enqueue({ key: r.id, lines: text });
 	}
 
 	const running = runs.filter((r) => r.state === "RUNNING").length;
@@ -630,39 +649,46 @@ function addGoal(text: string): string {
  * 不预热的话，重启后第一次轮询会把所有旧的已完成 run 当成「刚刚完成」，
  * 一次性唤醒几百条通知。
  */
-async function primeHandled(): Promise<void> {
-	if (cfg.mode === "dir") {
-		const res = await runRemote(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
-		if (!res.ok) return;
-		for (const r of parseStatus(res.out)) {
-			if (r.state !== "RUNNING") markHandled(watch, r.id);
-		}
-		return;
-	}
-	// table：把当前已经终态的（DONE / CRASHED）标为已报过
-	for (const e of parseTableEntries()) {
-		const st = await remoteRunState(e);
-		if (st === "DONE" || st === "CRASHED") markHandled(watch, e.path);
-	}
+/**
+ * 定时器和 agent_settled 都走这里：
+ *   - 防重入（ssh 慢时上一轮还没回来，下一轮别叠上来，否则并发 ssh + 重复入队）
+ *   - 永不抛（poll 内部出任何错都记进 lastStatus，不能把定时器搞死）
+ */
+function tick(pi: ExtensionAPI): void {
+	if (pollInFlight) return;
+	pollInFlight = true;
+	void poll(pi)
+		.catch((e) => {
+			lastStatus = `轮询出错：${e instanceof Error ? e.message : String(e)}`;
+		})
+		.finally(() => {
+			pollInFlight = false;
+		});
 }
 
 async function startPolling(pi: ExtensionAPI): Promise<void> {
-	if (polling) return;
-	polling = true;
+	if (timer) return;
+
 	watch = loadState();
 	escalatedOnce = new Set();
 	sshFailCount = 0;
-	await primeHandled();
-	timer = setInterval(() => void poll(pi), cfg.pollIntervalSec * 1000);
-	void poll(pi);
+	pending = []; // 丢掉上次残留，否则会用陈旧内容唤醒
+
+	// 注意：**启动时不要预标记任何 run 为已报过**。
+	// 以前有个 primeHandled() 会把启动那一刻已终态的 run 标为 handled，
+	// 结果「实验跑完之后才 /rl start」的那些结果永远不会被报出来——
+	// 正是最该报的场景。重启不重复报由 .pi/runs-state.json 的持久化保证，不需要它。
+	timer = setInterval(() => tick(pi), cfg.pollIntervalSec * 1000);
+	tick(pi);
 }
 
 function stopPolling(): void {
-	polling = false;
 	if (timer) {
 		clearInterval(timer);
 		timer = undefined;
 	}
+	pending = [];
+	pollInFlight = false;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -675,8 +701,8 @@ export default function (pi: ExtensionAPI) {
 
 			// 默认动作 = 开始循环（最常做的那件事）
 			if (!a || a === "start" || a === "on") {
-				if (polling) {
-					notify(statusText(), "info");
+				if (isRunning()) {
+					notify(`循环已在运行，不用重复启动。\n${statusText()}`, "info");
 					return;
 				}
 				if (!isConfigured(cfg)) {
@@ -688,7 +714,15 @@ export default function (pi: ExtensionAPI) {
 					);
 					return;
 				}
-				await startPolling(pi);
+				try {
+					await startPolling(pi);
+				} catch (e) {
+					notify(
+						`启动失败：${e instanceof Error ? e.message : String(e)}\n可以直接重试 /rl，或 /rl doctor 查环境`,
+						"error",
+					);
+					return;
+				}
 				notify(
 					`循环已开始 — 我会盯着实验，一有结果就叫醒 agent 继续迭代你的方法。\n/rl stop 停止`,
 					"info",
@@ -879,9 +913,17 @@ export default function (pi: ExtensionAPI) {
 					details: { ok: false },
 				};
 			}
+			// gpu 拼进单引号里，先卡住格式，免得 agent 传进来的内容把命令结构撑坏
+			const gpu = params.gpu.trim();
+			if (!/^[\d,\s]+$/.test(gpu)) {
+				return {
+					content: [{ type: "text", text: `gpu 只能是数字和逗号（当前是「${gpu}」）` }],
+					details: { ok: false },
+				};
+			}
 			// 命令用 base64 传递，绕开所有 shell 引号问题
 			const b64 = Buffer.from(params.cmd, "utf8").toString("base64");
-			const remote = `${cfg.startCommand} --gpu '${params.gpu}' --cmd-b64 '${b64}'`;
+			const remote = `${cfg.startCommand} --gpu '${gpu}' --cmd-b64 '${b64}'`;
 			const res = await runRemote(cfg.sshHost, remote, cfg.sshTimeoutSec);
 			const text = res.ok
 				? `已起 run：${res.out.trim() || "(无输出)"}`
@@ -892,8 +934,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_settled", (_event, ctx) => {
 		lastCtx = ctx;
-		if (!polling) return;
+		if (!timer) return;
 		// 一轮结束后立刻查一次，避免白等一个间隔
-		void poll(pi);
+		tick(pi);
 	});
 }
