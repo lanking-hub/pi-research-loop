@@ -419,9 +419,48 @@ async function doctor(): Promise<void> {
 	notify(lines.join("\n"), problems > 0 ? "warning" : "info");
 }
 
+const AGENTS_BEGIN = "<!-- BEGIN research-loop -->";
+const AGENTS_END = "<!-- END research-loop -->";
+
+/**
+ * AGENTS.md 特殊处理：**不能跳过**。
+ *
+ * pi 在同一个目录里只加载一份上下文文件（AGENTS.override.md > AGENTS.md > CLAUDE.md），
+ * 所以项目里已经有 AGENTS.md 时，再放一个新文件是不会被读的。
+ * 而 table 模式完全依赖 agent 遵守规则（写 DONE + 调 track_run），
+ * 规则没进去 = 实验永远不会被等 = 静默失败。
+ *
+ * 所以：没有就创建；有就在末尾追加一个带标记的规则块；
+ * 已经追加过就原地更新那一块（幂等，重复跑不会堆积）。
+ */
+function installAgentsRules(tplDir: string): string {
+	const dest = join(process.cwd(), "AGENTS.md");
+	const src = join(tplDir, "AGENTS.research.md");
+	if (!existsSync(src)) return `✗ 模板缺失：AGENTS.research.md`;
+
+	const block = `${AGENTS_BEGIN}\n${readFileSync(src, "utf8").trim()}\n${AGENTS_END}\n`;
+
+	try {
+		if (!existsSync(dest)) {
+			writeFileSync(dest, block);
+			return `✓ 已生成：AGENTS.md（agent 规则）`;
+		}
+		const cur = readFileSync(dest, "utf8");
+		if (cur.includes(AGENTS_BEGIN)) {
+			const re = new RegExp(`${AGENTS_BEGIN}[\\s\\S]*?${AGENTS_END}\\n?`);
+			writeFileSync(dest, cur.replace(re, block));
+			return `✓ 已更新：AGENTS.md 里的 research-loop 规则块`;
+		}
+		writeFileSync(dest, `${cur.replace(/\s+$/, "")}\n\n${block}`);
+		return `✓ 已追加：research-loop 规则块到你已有的 AGENTS.md（原有内容未动）`;
+	} catch (e) {
+		return `✗ 写 AGENTS.md 失败：${e instanceof Error ? e.message : String(e)}`;
+	}
+}
+
 /**
  * 把包里 templates/ 的模板生成到当前项目目录，省掉手动拷贝。
- * 已存在的文件一律跳过，不覆盖。
+ * 其他文件已存在就跳过（不覆盖你的内容）；AGENTS.md 例外，见上。
  */
 function init(): void {
 	const tplDir = templatesDir();
@@ -432,14 +471,13 @@ function init(): void {
 
 	const cwd = process.cwd();
 	const targets = [
-		{ from: "AGENTS.research.md", to: "AGENTS.md", hint: "agent 规则" },
 		{ from: "goal.md", to: join(".auto", "goal.md"), hint: "你写方向" },
 		{ from: "notes.md", to: join(".auto", "notes.md"), hint: "agent 写进度" },
-		{ from: "runs.txt", to: join(".auto", "runs.txt"), hint: "正在跑的实验路径（agent 增删）" },
+		{ from: "runs.txt", to: join(".auto", "runs.txt"), hint: "正在跑的实验（agent 增删）" },
 		{ from: "research-loop.json", to: join(".pi", "research-loop.json"), hint: "项目级配置" },
 	];
 
-	const lines: string[] = [];
+	const lines: string[] = [installAgentsRules(tplDir)];
 	for (const t of targets) {
 		const src = join(tplDir, t.from);
 		const dest = join(cwd, t.to);
@@ -462,9 +500,10 @@ function init(): void {
 
 	lines.push("");
 	lines.push("下一步：");
-	lines.push("1. 填 .pi/research-loop.json 里的 4 个 TODO");
-	lines.push("2. /reload（新生成的 AGENTS.md 要重启才加载）");
-	lines.push("3. /rl doctor 自查");
+	lines.push("1. 填 .pi/research-loop.json 里的 sshHost");
+	lines.push("2. 填 .auto/goal.md（方向、指标、并发上限）");
+	lines.push("3. /reload（AGENTS.md 要重新加载才生效）");
+	lines.push("4. /rl doctor 自查");
 
 	notify(lines.join("\n"), "info");
 }
