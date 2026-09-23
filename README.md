@@ -1,248 +1,237 @@
 # pi-research-loop
 
-让 pi 在**远程 GPU 服务器**上自主跑科研迭代循环：起实验 → 等 → 有结果就唤醒 agent 分析 → 决定下一步 → 起下一个实验，不停循环。
+Run an **autonomous research iteration loop** on a remote GPU server, driven by [pi](https://github.com/earendil-works/pi): launch an experiment → wait → wake the agent when results land → analyze → next experiment → repeat.
 
-适用于任何「改代码 / 调方法 → 跑实验 → 看结果」的计算机科研场景。
+Built for any research workflow of the shape *change the method/code → run an experiment → look at the result*.
 
-> **Windows 用户**：直接看 [docs/setup-windows.md](docs/setup-windows.md)，那是一份从零到跑通的完整清单。
+> **Windows users**: see [docs/setup-windows.md](docs/setup-windows.md) for a start-to-finish checklist.
 
 ---
 
-## 核心思路
+## The idea
 
-**扩展只做驱动和唤醒，不判定任何事。**
+**The extension only polls and wakes. It never judges.**
 
-| 谁 | 做什么 |
+| Who | Does what |
 |---|---|
-| **扩展** | 定时 ssh 轮询 run 状态；有结果就唤醒 agent |
-| **agent** | 读结果、调研、改代码、起下一个实验——全部在这一轮里做完 |
-| **你** | 写 `goal.md` 定方向；中途随时插话；看 `notes.md` 掌握进度 |
+| **Extension** | Asks the server every 60s: did a registered experiment finish? Wakes the agent if so |
+| **Agent** | Reads results, researches, changes the method/code, launches the next experiment — all inside one turn |
+| **You** | Write `goal.md` to set direction, interrupt anytime, read `notes.md` for progress |
 
-扩展不认识你的指标、不做 keep/discard、不决定下一步。领域规则全在 `AGENTS.md` 里，由你维护。
+The extension knows nothing about your metrics. It does not keep/discard, and does not decide what to try next. All domain rules live in `AGENTS.md`, maintained by you.
 
-### 两个关键取舍
+### Two decisions that shape everything
 
-**1. 轮询用代码，不用 LLM。** 轮询是一次 ssh（零 token），只有「有结果了→唤醒」才花钱。让 LLM 每隔一会儿去问「跑完了吗」，光等待就能烧掉几百万 token，还会把「还没好」这种废话永久塞进上下文。
+**1. Polling is code, not the LLM.** A poll is one `ssh` call — zero tokens. Only the wake-up costs money. If the LLM asked "is it done yet?" every few minutes, waiting alone would burn millions of tokens, *and* all those "not yet" replies would stay in context forever, making every later turn more expensive.
 
-**2. 结束文件是唯一契约。** 实验跑完写一个 `DONE` 文件，扩展只认「这个文件出现了」，**内容一律不看**。你想往里写什么指标、什么格式，扩展都不管——所以这套东西不需要你先把指标体系定死。
+**2. The `DONE` file is the only contract.** When an experiment finishes, something writes a `DONE` file. The extension only checks whether it exists — **it never reads the contents**. Write whatever metrics you want, in whatever format. You don't have to freeze a metric schema up front.
 
 ---
 
-## 两种盯实验的方式
+## Two ways to track experiments
 
-| | **table 模式**（默认，迭代用） | **dir 模式**（baseline 用） |
+| | **table mode** (default, for iteration) | **dir mode** (for baselines) |
 |---|---|---|
-| 怎么起实验 | **你 / agent 决定**——`nohup`、`sbatch`、`docker`、`conda` 都行 | 固定的 `run_exp.sh` |
-| 扩展盯什么 | `.auto/runs.txt` 里登记的路径下有没有 `DONE` | 固定 runs 目录 + 服务器脚本报状态 |
-| 要在服务器部署脚本吗 | **不需要** | 需要 `server/*.sh` |
-| 必填配置 | **无（零配置）** | `sshHost` + `runsPath` + `statusCommand` |
-| 适合 | 变数多的迭代探索 | 流程固定的批量跑 |
+| How experiments launch | **Up to you / the agent** — `nohup`, `sbatch`, `docker`, `conda` | Fixed `run_exp.sh` |
+| What the extension watches | Paths registered in `.auto/runs.txt`, checking for `DONE` | A fixed runs dir + server scripts reporting state |
+| Deploy scripts to the server? | **No** | Yes, `server/*.sh` |
+| Required config | **None (zero-config)** | `sshHost` + `runsPath` + `statusCommand` |
+| Best for | Open-ended method iteration | Fixed, repetitive batch runs |
 
-**table 模式只认一个约定**：实验跑完时，在它的输出目录里写一个 `DONE` 文件（内容随便，建议放指标）。
+**table mode asks for exactly one thing**: when an experiment finishes, write a `DONE` file in its output directory (contents are up to you; metrics recommended).
 
-怎么起实验完全不限制——所以 Slurm、Docker、多机、conda 环境全都支持。兼容性来自"不管你怎么起"。
+How you launch is entirely unconstrained — which is why Slurm, Docker, multi-node and conda environments all just work. **Compatibility comes from not caring how you launch.**
 
-配套的：
+Alongside it:
 
-- `track_run` 工具 —— 起完实验登记路径 + 进程号，一次调用
-- **进程号可选但强烈建议**：填了崩溃能**立刻**发现（`kill -0` 一次 ssh 就判出来），不填只能等超时
-- 超时兜底 —— 登记超过 `maxHours`（默认 72 小时）还没 DONE 就提醒，防"忘了写 DONE"变成永久静默
+- `track_run` tool — register an experiment path + PID in one call
+- **The PID is optional but strongly recommended**: with it, a crash is detected **immediately** (`kill -0`, one ssh); without it you wait for the timeout
+- Timeout fallback — if a registered run still has no `DONE` after `maxHours` (default 72h), you get reminded, so a forgotten `DONE` can't become permanent silence
 
-切换：配置里 `"mode": "table"` 或 `"dir"`。
+Switch with `"mode": "table"` or `"dir"`.
 
-## 安装
+## Install
 
 ```bash
-pi install git:github.com/<你>/pi-research-loop
+pi install git:github.com/lanking-hub/pi-research-loop
 ```
 
-（也可以 `pi install git:github.com/<你>/pi-research-loop@v1` 钉版本。）
+(Pin a version with `pi install git:github.com/lanking-hub/pi-research-loop@v1`.)
 
 ---
 
-## 快速开始
+## Quick start
 
-### 1. 进项目目录，一键整备
+### 1. Open a console directory and run one command
 
-pi 的文件都跟着当前目录走，所以先建个「控制台目录」（代码不用放本地）：
+Everything pi does is relative to the current directory, so make a **console directory** (your code does not need to be local):
 
 ```bash
 cd ~/research && pi
 /rl setup
 ```
 
-它会先生成项目文件：
+It first generates project files:
 
-| 生成的文件 | 用途 |
+| File | Purpose |
 |---|---|
-| `AGENTS.md` | agent 规则。**已有就在末尾追加一块**，你的内容不动 |
-| `.auto/goal.md` | **你写**：方法、目标、看哪些指标、大致方向 |
-| `.auto/notes.md` | agent 写：每轮重写，含死胡同 |
-| `.auto/runs.txt` | 正在跑的实验（agent 增删） |
+| `AGENTS.md` | Agent rules. **If you already have one, a block is appended** — your content is untouched |
+| `.auto/goal.md` | **You write**: method, goal, which metrics matter, rough direction |
+| `.auto/notes.md` | Agent writes: progress, dead ends (rewritten each turn) |
+| `.auto/runs.txt` | Running experiments (agent adds/removes) |
 
-然后配 ssh。**只问两件事**：服务器地址、用户名。
+Then it configures ssh, asking only two things: **server address** and **username**.
 
-然后自动做完：生成钥匙对 → 把别名写进 `~/.ssh/config` → 登记指纹 → 配好免密。
+After that it runs by itself: generate a keypair → write the alias into `~/.ssh/config` → register the host key → set up passwordless login.
 
-（ssh 别名是内部固定常量 `research-loop-server`，你不用知道也不用配置。万一你 `~/.ssh/config` 里已经有同名条目且指向别的机器，setup 会检测到并报错，不会静默连错。）
+(The ssh alias is a fixed internal constant, `research-loop-server`. You never need to know it or configure it. If your `~/.ssh/config` already has an entry with that name pointing somewhere else, setup detects it and reports an error rather than silently connecting to the wrong machine.)
 
-唯一要你动手的一步：**把公钥装到服务器**（要输一次服务器密码）。向导会打印命令并**在原地等你确认**，装完选 Yes 就继续——**不用重跑 setup**。
+The one manual step: **install your public key on the server** (needs your password once). The wizard prints the command and **waits in place** for you — run it in another terminal, come back, pick Yes, and it continues. **No need to re-run setup.**
 
-### 3. 体检
+### 2. Verify
 
 ```bash
-/reload       # 让新生成的 AGENTS.md 生效
-/rl doctor    # 逐项实测：ssh 连通、登记表、项目文件
+/reload       # make the new AGENTS.md take effect
+/rl doctor    # checks ssh connectivity, the runs table, project files
 ```
 
-### 3. 写方向，开跑
+### 3. Set direction and start
 
-`.auto/goal.md` 里写：方法、目标、看哪些指标、大致方向、并发上限。然后：
+Write `.auto/goal.md`: method, goal, which metrics, rough direction, concurrency limit. Then:
 
 ```bash
 /rl
 ```
 
-跟着直接跟 agent 说要做什么，它会起第一个实验，之后自动循环。
+Then just tell the agent what to work on. It launches the first experiment, and the loop continues from there.
 
-### 命令一览
-
-```bash
-/rl               开始循环（默认动作；已在跑则显示状态）
-/rl stop          停止
-/rl status        看状态
-/rl goal <文本>    往 .auto/goal.md 加一条建议，下一轮自动生效
-/rl doctor        环境体检（只读）
-/rl setup         首次一站式：生成项目文件 + 配 ssh（不需要配置文件）
-```
-
-### 用 `/rl doctor` 自查
-
-环境配错的症状是「轮询静默不动」——不报错、不唤醒，很难查。所以先跑：
+### Commands
 
 ```bash
-/rl doctor
+/rl               Start the loop (default action; shows status if already running)
+/rl stop          Stop
+/rl status        Status
+/rl goal <text>   Append a note to .auto/goal.md, picked up next turn
+/rl doctor        Environment check (read-only)
+/rl setup         First-time: generate project files + configure ssh (needs TUI mode)
 ```
 
-它会实测并逐项报告：
+---
 
-| 检查项 | 不通过时 |
+## Steering it while it runs
+
+| You want to | Do this |
 |---|---|
-| ssh 别名能否免密连通 | 提示检查 `~/.ssh/config` 和 key，或重跑 `/rl setup` |
-| `.auto/runs.txt` 有没有内容 | 还没登记实验时正常 |
-| 项目里有没有 `.auto/goal.md` / `.auto/notes.md` / `AGENTS.md` | 提示重跑 `/rl setup` |
+| Change long-term direction | Edit `.auto/goal.md` — next turn picks it up |
+| Correct something mid-flight | Type and press **Enter** (steer: applies after the current tool call) |
+| Let it finish this turn first | **Alt+Enter** (follow-up) |
+| Stop completely | **Esc** |
+| See progress | Read `.auto/notes.md` |
 
-（dir 模式还会额外查 runs 目录和 `statusCommand`。）
-
-全绿了再 `/rl`。
-
----
-
-## 中途介入
-
-| 你想干嘛 | 怎么做 |
-|---|---|
-| 改长期方向 | 直接改 `.auto/goal.md`，下一轮自动生效 |
-| 中途改某个细节 | 直接打字 **Enter** = steer，当前工具调用跑完就生效 |
-| 让它先干完这轮 | **Alt+Enter** = follow-up |
-| 彻底停下 | **Esc** |
-| 看进度 | 读 `.auto/notes.md` |
-
-不需要自定义命令，pi 自带这些交互。
+No custom commands needed — these are built into pi.
 
 ---
 
-## 目录结构
+## Working on the server
 
-```
-extensions/research-loop.ts   主扩展：轮询 + 唤醒 + track_run 工具（+ start_run，dir 模式用）
-lib/config.ts                 配置读写（全局 → 项目级）
-lib/ssh.ts                    ssh 执行（跨平台，不走本地 shell）
-server/run_status.sh          服务器上跑，输出每个 run 的状态
-server/run_exp.sh             服务器上跑，起一个受管理的实验
-templates/                    拷到你项目里的模板
-```
-
-### 每个 run 的目录
-
-```
-runs/0007/
-├─ cmd.txt        启动命令
-├─ gpu.txt        用的哪张卡
-├─ project.txt    项目路径
-├─ pid            进程 PID
-├─ log.txt        stdout/stderr
-├─ RUNNING        起实验时创建，结束时删除
-├─ commit.txt     git rev-parse HEAD
-├─ patch.diff     git diff HEAD（未提交的改动）
-└─ DONE           结束时创建：exit code + 结束时间 + 日志尾部
-```
-
-**不强制 git commit**，但用 `commit.txt` + `patch.diff` 保证每个 run 能追溯到确定的代码状态。
-
----
-
-## 设计细节
-
-- **状态机**：`DONE`→完成 / pid 死了→`CRASHED` / 日志超时未更新→`STALLED` / 否则→`RUNNING`
-- **崩溃检测是必需的**：只看 `DONE` 的话，实验第 3 分钟 OOM 挂了，扩展会一直轮询到天荒地老
-- **合并窗口 60s**：同时完成的几个 run 合成一次唤醒，省一轮 token
-- **异常升级**：ssh 连续失败 3 次、或状态输出解析不出来 → 唤醒 LLM 让它诊断
-- **防烧钱**：配置没填完时 `/rl start` 直接拒绝；异常升级每次轮询会话只做一次
-- **自然停止**：没有任何 RUNNING 也没有待处理时，轮询自动停
-
----
-
-## 常见问题
-
-**为什么我的实验从来没被唤醒？**
-大概率是你直接 `ssh ... nohup python` 起实验了——那样 run 不在 `runs/` 里，扩展根本看不到。必须用 `start_run` 工具或 `run_exp.sh`。
-
-**服务器没装 gpustat？**
-查显卡由 agent 自己 ssh 完成（AGENTS.md 里写死了这条要求），不用配任何东西。
-
-**我想让 DONE 里结构化地放指标？**
-改 `run_exp.sh` 里写 `DONE` 的那段就行——扩展不解析它的内容，你随便写。
-
----
-
-## Quick Start (EN)
-
-A pi extension that drives an autonomous research loop on a remote GPU server: launch experiment → wait → wake the agent when results land → analyze → next experiment.
+The agent decides **how** to launch. It is told to probe the environment first:
 
 ```bash
-pi install git:github.com/<you>/pi-research-loop
+ssh research-loop-server "which sbatch; which docker; which conda; nvidia-smi -L"
 ```
 
-1. **SSH**: add a passwordless `Host` entry in `~/.ssh/config`.
-2. **Server**: copy `server/*.sh` to the server, `chmod +x`.
-3. **Set up**: `cd <your-project> && pi`, then `/rl setup` — asks only for **server address** and **username**, then generates keys, writes a fixed ssh alias into `~/.ssh/config`, registers the host key, and sets up passwordless login. **No config file needed.**
-4. (files `AGENTS.md`, `.auto/goal.md`, `.auto/notes.md`, `.auto/runs.txt` are generated by `/rl setup` too)
-5. **Set up**: run `/rl setup` — an interactive wizard that asks for server address, user, alias, runs dir and project dir, then generates keys, writes the ssh alias, registers the host key, uploads the scripts and **writes the config for you**. The only manual step (installing your public key, which needs your password once) is handled inline — it waits for your confirmation rather than making you re-run.
-6. **Verify**: `/reload`, then `/rl doctor`.
-7. **Run**: `/rl start`.
+| Environment | How to launch | End signal |
+|---|---|---|
+| `sbatch` present | `sbatch train.sh` | Write `DONE` at the end of the script; job id is **not** a PID, leave PID empty |
+| `docker` present | `docker run ...` | Write `DONE` inside the container; leave PID empty |
+| Bare metal | `nohup ... & echo $!` | That number is the PID — **pass it to `track_run`** |
+| Needs conda | `conda run -n <env> python ...` | Same as above |
 
-Key design: **the extension only polls and wakes — it never judges.** Polling is plain `ssh` (zero tokens); only the wake-up costs a model call. The `DONE` file is the only contract between your experiments and the extension, and its contents are never parsed — so you don't need a fixed metric schema.
+See [docs/environments.md](docs/environments.md) for cloud GPU platforms, Slurm details, and troubleshooting.
 
 ---
 
-## 文档
+## Design notes
 
-| 文档 | 给谁看 |
+- **State machine**: `DONE` exists → finished / PID gone → `CRASHED` / log untouched too long → `STALLED` / otherwise → `RUNNING`
+- **Crash detection is mandatory**: watching only for `DONE`, an experiment that OOMs at minute 3 would be polled forever, silently
+- **60s merge window**: runs that finish together are batched into one wake-up, saving a turn
+- **Escalation**: 3 consecutive ssh failures, or unparseable state output → wake the LLM to diagnose
+- **Burn protection**: refuses to start if config is incomplete; each escalation fires at most once per polling session
+- **Natural stop**: when nothing is running and nothing is pending, polling stops by itself
+
+---
+
+## Layout
+
+```
+extensions/research-loop.ts   Main extension: commands + tools + polling
+lib/config.ts                 Config (includes the fixed SSH_ALIAS constant)
+lib/ssh.ts                    runRemote — the single remote-execution entry point
+lib/state.ts                  Registration times / already-reported (persisted)
+lib/paths.ts                  Locates bundled templates/ and server/
+lib/setup.ts                  /rl setup interactive wizard
+server/*.sh                   dir mode only (baseline flow)
+templates/                    Copied into your project by /rl setup
+```
+
+Runtime files:
+
+```
+your project dir
+├─ AGENTS.md                  yours + the appended research-loop block
+├─ .auto/
+│   ├─ goal.md                you write: direction, metrics, concurrency limit
+│   ├─ notes.md               agent writes: progress, dead ends
+│   └─ runs.txt               running experiments (agent maintains)
+└─ .pi/
+    └─ runs-state.json        extension's own bookkeeping — ignore it
+```
+
+The extension **only writes inside your working directory**. `~/.pi/agent/` is read-only to it. The only global thing it touches is `~/.ssh/` during `/rl setup`, and only by **appending**.
+
+---
+
+## Docs
+
+| Doc | For |
 |---|---|
-| [docs/setup-windows.md](docs/setup-windows.md) | **要在 Windows 上跑起来的人**——从零到循环跑通的完整清单 |
-| [docs/internals.md](docs/internals.md) | 要继续开发这个扩展的人——实测确认过的机制、踩过的坑、未实现的设计 |
-| [docs/reference.md](docs/reference.md) | **完整清单**——所有命令、工具、配置项、文件，一页查全 |
+| [docs/setup-windows.md](docs/setup-windows.md) | Windows, start to finish |
+| [docs/environments.md](docs/environments.md) | Cloud GPU / Slurm / Docker / conda + troubleshooting |
+| [docs/internals.md](docs/internals.md) | Extending it: verified behaviours, gotchas, unimplemented designs |
+| [docs/reference.md](docs/reference.md) | Full reference: commands, config fields, files |
 
-## 路线图
+> Setup docs are currently Chinese; translation is on the roadmap.
 
-- [ ] **本地模式**：pi 直接装在服务器上时不走 ssh（`runSsh` 包一层即可，约 10 行）。目前只支持"pi 在本地 + ssh 到服务器"
-- [ ] **baseline 批量跑扩展**：拉取同类方法、逐个跑、结果落盘（设计未定，欢迎讨论）
-- [ ] **模型排序链与限额自动切换**：`lib/model-chain.ts`，见 [internals §8](docs/internals.md#8-模型切换未实现设计已定)
-- [ ] **模板内嵌**：去掉对 `import.meta.url` 定位 `templates/` 的路径依赖（Windows 上若出问题就做）
-- [ ] **英文 README**（面向更广的研究生群体）
-- [ ] **云 GPU 平台 / Slurm 上手说明 + FAQ 排障**
+## Roadmap
+
+- [x] **Local mode**: pi installed directly on the server, no ssh (`"sshHost": "local"`)
+- [ ] **Translate docs to English**
+- [ ] **Baseline batch-runner extension**: fetch reference methods, run each, record results
+- [ ] **Model chain with quota-based failover**: `lib/model-chain.ts`
+- [ ] **Inline templates**: drop the `import.meta.url` dependency for locating `templates/`
 
 ## License
 
 MIT
+
+---
+
+## 中文速览
+
+在远程 GPU 服务器上跑自主科研迭代循环：起实验 → 等 → 有结果唤醒 agent → 分析 → 改方法/代码 → 起下一个。
+
+```bash
+pi install git:github.com/lanking-hub/pi-research-loop
+cd ~/research && pi
+/rl setup        # 只问：服务器地址、用户名
+/reload
+/rl              # 开始循环
+```
+
+- **table 模式唯一约定**：实验跑完在输出目录写 `DONE` 文件（内容随意，建议放指标）。怎么起实验不限——Slurm / Docker / conda / 裸机都行
+- **零配置、服务器零部署**
+- **命令**：`/rl`（开始）、`stop`、`status`、`goal <文本>`、`doctor`、`setup`
+- **中途介入**：改 `.auto/goal.md`；打字 Enter = steer；Esc = 停
+
+详细说明见 [docs/reference.md](docs/reference.md)（完整清单）、[docs/setup-windows.md](docs/setup-windows.md)（Windows 上手）。
