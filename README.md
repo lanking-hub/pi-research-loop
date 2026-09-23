@@ -244,6 +244,7 @@ Key design: **the extension only polls and wakes — it never judges.** Polling 
 
 ## 路线图
 
+- [ ] **本地模式**：pi 直接装在服务器上时不走 ssh（`runSsh` 包一层即可，约 10 行）。目前只支持"pi 在本地 + ssh 到服务器"
 - [ ] **baseline 批量跑扩展**：拉取同类方法、逐个跑、结果落盘（设计未定，欢迎讨论）
 - [ ] **模型排序链与限额自动切换**：`lib/model-chain.ts`，见 [internals §8](docs/internals.md#8-模型切换未实现设计已定)
 - [ ] **`/rl init` 模板内嵌**：去掉对 `import.meta.url` 定位 `templates/` 的路径依赖（Windows 上若出问题就做）

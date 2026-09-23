@@ -40,16 +40,35 @@
 
 ## 服务器与实验（最关键，一步步照做）
 
-**怎么起实验你决定**——`nohup`、`sbatch`、`docker run`、`conda run` 都行，扩展不干涉。
-但下面 4 步必须全做：
+**怎么起实验你决定**——扩展不干涉、也不需要知道。下面 4 步必须全做：
 
-**1. 起实验，并拿到进程号**
+**0. 先搞清楚这台服务器是什么环境**
+
+不同机器差别很大（裸机 / Slurm / Docker / 云 GPU 平台），**每次起实验前先探一下**：
+
+```bash
+ssh {{SSH_ALIAS}} "which sbatch; which docker; which conda; nvidia-smi -L"
+```
+
+按探到的结果选起法：
+
+| 环境 | 怎么起 | 怎么拿"结束信号" |
+|---|---|---|
+| 有 `sbatch` | `sbatch train.sh` | 脚本末尾写 `DONE`；作业号**不是** pid，pid 留空 |
+| 有 `docker` | `docker run ...` | 容器内跑完写 `DONE`；pid 留空 |
+| 都没有（裸机） | `nohup ... & echo $!` | 那个数字就是 pid，**填进 `track_run`** |
+| 需要 conda 环境 | 命令里写 `conda run -n <环境名> python ...` | 同上 |
+
+> 环境不熟就多探几次（`sinfo`、`ls /opt`、看别人留下的脚本）。
+> **判断错了不会报错，只会让实验永远没人等**——所以这一步别省。
+
+**1. 起实验，并尽量拿到进程号**
 
 ```bash
 ssh {{SSH_ALIAS}} "cd /项目 && nohup python train.py > /输出目录/log.txt 2>&1 & echo \$!"
 ```
 
-最后那个数字就是进程号。
+最后那个数字就是进程号（裸机才有；Slurm / Docker 见上表，留空）。
 
 **2. 保证实验结束时会写 `DONE`**
 
