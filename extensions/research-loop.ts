@@ -473,7 +473,8 @@ function ensureProjectFiles(): string[] {
 	const cwd = process.cwd();
 	const targets = [
 		{ from: "goal.md", to: join(".auto", "goal.md"), hint: "你写方向" },
-		{ from: "notes.md", to: join(".auto", "notes.md"), hint: "agent 写进度" },
+		{ from: "notes.md", to: join(".auto", "notes.md"), hint: "当前状态 + 死胡同（每轮重写，精简）" },
+		{ from: "tree.md", to: join(".auto", "tree.md"), hint: "完整尝试树（累积，按需读）" },
 		{ from: "runs.txt", to: join(".auto", "runs.txt"), hint: "正在跑的实验（agent 增删）" },
 		// 注意：不生成 research-loop.json。table 模式零配置就能跑，
 		// 想调参的人自己建（字段见 docs/reference.md）。
