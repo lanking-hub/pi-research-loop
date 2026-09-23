@@ -31,10 +31,10 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { isConfigured, loadConfig, PLACEHOLDER, type Config } from "../lib/config.ts";
+import { templatesDir } from "../lib/paths.ts";
 import { runSsh } from "../lib/ssh.ts";
 import { setup } from "../lib/setup.ts";
 
@@ -270,7 +270,7 @@ async function doctor(): Promise<void> {
  * 已存在的文件一律跳过，不覆盖。
  */
 function init(): void {
-	const tplDir = join(dirname(fileURLToPath(import.meta.url)), "..", "templates");
+	const tplDir = templatesDir();
 	if (!existsSync(tplDir)) {
 		notify(`找不到模板目录：${tplDir}`, "error");
 		return;

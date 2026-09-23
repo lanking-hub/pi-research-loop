@@ -18,7 +18,7 @@
 
 ## 2. 重新登录模型
 
-**`auth.json` 不跨机器同步。** 换机器必须 `/login` 重新配一遍——GPT 订阅、智谱、DeepSeek 各家都要重登。
+**`auth.json` 不跨机器同步。** 换机器必须 `/login` 重新配一遍——各家模型都要重登。
 
 漏了这步的症状是：切换模型静默失败（`setModel` 返回 false），或者报鉴权错。
 
@@ -51,51 +51,63 @@ AGENTS.md                   agent 规则
 
 `/reload` 是必须的——新生成的 `AGENTS.md` 要重启才加载。
 
-## 5. 配 ssh 免密
+> 两个目录是**分层**不是冗余：`.pi/` 是 pi 的平台目录（含机器相关的 ssh 配置，别进 git），
+> `.auto/` 是你的内容目录（goal/notes 要进 git、跨机器同步）。
 
-`%USERPROFILE%\.ssh\config`：
-
-```
-Host gpu-server
-    HostName <服务器地址>
-    User <用户名>
-    IdentityFile ~/.ssh/<你的 key>
-    ControlMaster auto
-    ControlPath ~/.ssh/cm-%r@%h:%p
-    ControlPersist 10m
-```
-
-**必须免密**——扩展用 `BatchMode=yes`，不会也不该碰密码。
-`ControlMaster` 不是必需，但能省掉每次轮询的握手。
-
-## 6. 准备服务器
+## 5. 一键配好 ssh 和服务器
 
 ```bash
-ssh gpu-server 'mkdir -p ~/runs'
-scp server/run_exp.sh server/run_status.sh gpu-server:~/bin/
-ssh gpu-server 'chmod +x ~/bin/run_exp.sh ~/bin/run_status.sh'
+/rl setup <服务器IP或域名> <用户名> [别名]
 ```
 
-服务器没装 `gpustat` 就把 `gpuCommand` 换成：
+别名缺省是 `research-server`。它会**断点续跑**——每一步幂等，卡在哪就重跑到哪：
+
+1. 检查 ssh 程序
+2. 没有钥匙对就生成一把（ed25519，**无密码**，自动化需要）
+3. 把 `Host <别名>` 写进 `~/.ssh/config`
+4. `ssh-keyscan` 登记服务器指纹（避开首连交互确认——`BatchMode` 答不了）
+5. 试着免密连一次
+6. 连上后：修 `~/.ssh` 权限、建 `~/bin`、上传并赋权两个管理脚本、建 runs 目录
+
+**唯一需要你动手的一步**：公钥还没装到服务器时，它会打印一条命令让你执行（输**最后一次**服务器密码）：
+
+```
+type "C:\Users\<你>\.ssh\id_ed25519.pub" | ssh <用户>@<服务器> "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+```
+
+装完重跑 `/rl setup`，会自动继续剩下的步骤。
+
+其他用法：
+
+```bash
+/rl setup <别名>     # 只给已存在的别名「补缺」
+/rl setup            # 对配置里已填的 sshHost 补缺
+```
+
+> **无密码私钥**：`/rl setup` 生成的钥匙没有密码（免密登录的前提）。别外传、别提交进 git。
+
+服务器没装 `gpustat` 的话，把配置里的 `gpuCommand` 换成：
 
 ```
 nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv
 ```
 
-## 7. 填配置
+## 6. 填配置
 
 `.pi/research-loop.json` 里 4 个 `TODO`：
 
 ```json
 {
-  "sshHost": "gpu-server",
+  "sshHost": "research-server",
   "runsPath": "/home/<你>/runs",
   "statusCommand": "RUNS_DIR=/home/<你>/runs /home/<你>/bin/run_status.sh",
   "startCommand": "RUNS_DIR=/home/<你>/runs PROJECT_DIR=/home/<你>/<项目> /home/<你>/bin/run_exp.sh"
 }
 ```
 
-## 8. 自查
+`sshHost` 填第 5 步的别名。
+
+## 7. 自查
 
 ```bash
 /rl doctor
@@ -103,13 +115,13 @@ nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=c
 
 逐项实测：配置字段 / ssh 免密连通 / runs 目录 / statusCommand / gpuCommand / 项目文件。全绿再下一步。
 
-## 9. 写方向
+## 8. 写方向
 
 `.auto/goal.md` 里写：方法、目标、看哪些指标（每个是越大越好还是越小越好）、大致方向、并发上限。
 
 **这一步只能你写**，扩展替不了。
 
-## 10. 启动
+## 9. 启动
 
 ```bash
 /rl start
@@ -119,12 +131,17 @@ nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=c
 
 ---
 
-## Windows 特有的两个待验证点
+## Windows 特有的坑
 
-1. **`/rl init` 的 `import.meta.url` 在 Windows 路径下能否定位到 `templates/`**
-   失败的话（提示"找不到模板目录"），手动从包安装目录拷 `templates/` 也行；长期解法是把模板内嵌进扩展。
-2. **`pi install git:` 在 Windows 上的安装目录**
-   影响你手动找 `templates/` 的位置。
+**不要用 `wsl ssh`。** WSL 是另一套环境：独立的钥匙和指纹记录，没配过，会卡在指纹确认或报缺钥匙。
+
+连服务器一律走**原生 ssh + `~/.ssh/config` 里的别名**：
+
+```bash
+ssh research-server "nvidia-smi"
+```
+
+这条同样写给 agent——`AGENTS.md` 模板里有「SSH 使用纪律」一节，别删。
 
 ---
 

@@ -15,8 +15,8 @@
 import { execFile } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { serverDir } from "./paths.ts";
 import { runSsh, sshBin } from "./ssh.ts";
 
 const IS_WIN = process.platform === "win32";
@@ -94,6 +94,15 @@ export async function setup(input: SetupInput): Promise<SetupReport> {
 
 	const alias = input.alias || DEFAULT_ALIAS;
 
+	// 有地址就必须要用户名：否则会把 "TODO" 当用户名写进 ssh config 并拿去连
+	if (input.host && !input.user) {
+		lines.push("✗ 提供了服务器地址但没给用户名");
+		lines.push("  用法：/rl setup <服务器IP或域名> <用户名> [别名]");
+		lines.push("");
+		lines.push("补全参数重跑 /rl setup");
+		return { lines, done: false, needsAttention: true };
+	}
+
 	// ── 第 1 步：ssh 程序存在 ──────────────────────────────
 	const ver = await exec(sshBin(), ["-V"], 8000);
 	if ((ver.out + ver.err).includes("OpenSSH")) {
@@ -116,6 +125,7 @@ export async function setup(input: SetupInput): Promise<SetupReport> {
 		const gen = await exec(keygenBin, ["-t", "ed25519", "-N", "", "-q", "-f", keyPath]);
 		if (gen.ok && existsSync(keyPath)) {
 			lines.push(`✓ 已生成新钥匙对：${keyPath}`);
+			lines.push("  ⚠ 这把私钥没有密码（自动化免密登录需要）。不要外传、不要提交进 git。");
 		} else {
 			problems += 1;
 			attention = true;
@@ -135,13 +145,9 @@ export async function setup(input: SetupInput): Promise<SetupReport> {
 			mkdirSync(sshDir(), { recursive: true });
 			appendFileSync(
 				join(sshDir(), "config"),
-				`\nHost ${alias}\n  HostName ${input.host}\n  User ${input.user || "TODO"}\n`,
+				`\nHost ${alias}\n  HostName ${input.host}\n  User ${input.user}\n`,
 			);
-			lines.push(`✓ 已写入别名 ${alias} → ${input.user || "TODO"}@${input.host}`);
-			if (!input.user) {
-				lines.push("  ⚠ 未提供用户名，config 里的 User 是 TODO，记得改");
-				problems += 1;
-			}
+			lines.push(`✓ 已写入别名 ${alias} → ${input.user}@${input.host}`);
 		}
 	} else {
 		// 没给 host：本模式只对已存在的别名整备
@@ -196,7 +202,6 @@ export async function setup(input: SetupInput): Promise<SetupReport> {
 
 	const binDir = await runSsh(effectiveAlias, "mkdir -p ~/bin && echo ok", 10);
 	if (binDir.ok) {
-		const serverDir = join(dirname(fileURLToPath(import.meta.url)), "..", "server");
 		let uploaded = 0;
 		for (const script of ["run_status.sh", "run_exp.sh"]) {
 			const src = join(serverDir, script);
