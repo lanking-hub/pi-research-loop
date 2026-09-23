@@ -1,6 +1,9 @@
 # 内部机制笔记
 
-给继续开发这个扩展的人（或 agent）。记录的是**实测确认过的行为和踩过的坑**，不是猜测。
+给继续开发这个扩展的人（或 agent）。记录的是**实测确认过**的行为和踩过的坑，不是猜测。
+
+当前默认模式是 **table 模式**（agent 登记实验路径，扩展只查 DONE + pid）。
+另一种 **dir 模式**（固定 runs 目录 + 服务器脚本）保留给 baseline 那种死流程，本文末尾有说明。
 
 ---
 
@@ -27,12 +30,9 @@
 
 **扩展文件只能存在于一个位置。** 同时出现在 `~/.pi/agent/extensions/` 和 `<项目>/.pi/extensions/` 会被加载两次 → 每轮唤醒两次，循环失控。
 
-**库文件不能放 `extensions/`。** pi 会把那里的 `.ts` 全当扩展加载（`loader.ts` 只扫一层，直接文件就加载）。共享代码要放旁边的 `lib/`：
+**库文件不能放 `extensions/`。** pi 会把那里的 `.ts` 全当扩展加载。共享代码放旁边的 `lib/`。
 
-```
-├── extensions/     ← pi 扫这里
-└── lib/            ← pi 不扫这里
-```
+---
 
 ## 2. 事件选择（重要）
 
@@ -44,83 +44,147 @@
 
 **用 `turn_end` 会导致一轮发两条消息，循环失控。**
 
-实测顺序：`agent_end` → `agent_settled`，间隔 1–6 毫秒。
+本扩展在 `agent_settled` 里立刻轮询一次（不等下一个间隔）。
 
-本扩展在 `agent_settled` 里做两件事：立刻轮询一次（不等下一个间隔），以及必要时唤醒下一轮。
+---
 
 ## 3. 循环的成本是 N²
 
 **历史由 pi 自动装配，扩展不需要也不应该手动拼历史。**
 
 - 源码：`packages/coding-agent/src/core/session-manager.ts` 的 `buildSessionContext()`
-- 流程：从会话树根走到当前叶子 → 收集沿途条目 → 转成消息 → 按当前模型重新编码
 - **每轮发送完整历史** → N 轮总成本是 **N²**，不是线性
-- 轮数多了触发自动压缩（默认 `keepRecentTokens: 20000`）
 
-**直接后果**：让 LLM 去轮询「跑完了吗」是灾难——每次空轮询都是一次完整的、带全量历史的调用，而且「还没好」这种废话会永久留在历史里，让之后每轮都更贵。这就是本扩展坚持**代码轮询、零 token** 的原因。
+**这条决定了整个设计的形状**：长实验的等待**绝不能交给 agent**。
+
+一次「跑完了吗」= 一次完整 LLM 调用带全量历史。两天实验、一小时一查 ≈ 几十次空轮询，后期单次几十万 token，**光等就能烧掉几百万 token**。
+
+所以轮询必须是纯代码：一次 ssh，零 token。这是扩展存在的唯一理由。
+
+---
 
 ## 4. 长实验等待：为什么不能用 sleep
 
-让 agent 在前台等实验跑完会：占着轮次、撑爆上下文、烧钱、不抗重启。
+让 agent 在前台等实验跑完会：占着轮次、撑爆上下文、烧钱、pi 一关就没了。
 
-正确架构（本扩展的实现）：
+table 模式的做法：
 
 ```
-1. agent 用 start_run 起实验 → nohup 后台，pid/log 写到文件
-2. agent 这一轮立刻结束
-3. 扩展用 setInterval + ssh 轮询（纯代码，零 token）
-4. 发现跑完/崩溃/卡死 → sendUserMessage 唤醒 agent
-5. agent 读结果、决定下一步、再立刻结束 → 回到 1
+1. agent 自己起实验（nohup / sbatch / docker / conda 随意），拿进程号
+2. agent 调 track_run 登记：路径 + 进程号
+3. agent 这一轮结束
+4. 扩展每 60 秒 ssh 问一次：DONE 在吗？进程还活着吗？
+5. 有结果 → sendUserMessage 唤醒 agent
+6. agent 看结果、改方法/代码、起下一个 → 回到 1
 ```
 
 ### 一个必须知道的限制
 
 **定时器挂在 pi 进程上，pi 关掉轮询就没了。**
 
-- 实验进程本身（nohup）独立于 pi，安全
+- 实验进程本身独立于 pi，安全
 - 但「唤醒 agent」需要 pi 活着
-- 缓解：状态全在文件里（重启后读文件即可恢复），需要更高可靠性就加系统 cron/systemd 兜底
+- 缓解：状态全在文件里，重启后读文件恢复
 
-### 检查不需要智能
+---
 
-PID 存活、日志 mtime、DONE 文件存在性 → 纯代码判断，零成本。
-只有「看不懂的报错要不要重试」才需要模型，那种情况交给唤醒后的 agent 处理。
+## 5. table 模式：唯一约定
 
-## 5. 崩溃检测是必需的
+**扩展只认一件事**：登记的路径下出现 `DONE` 文件。
 
-只看 `DONE` 文件的话，实验第 3 分钟 OOM 挂了 → 永远不会有 `DONE` → 扩展轮询到天荒地老，而且不报错、不通知，最难查。
+怎么起实验完全不管——`nohup`、`sbatch`、`docker run`、`conda run` 都行。
+**兼容性来自"不管你怎么起"**，这也是它能覆盖 Slurm / Docker / 多机 / conda 各种环境的原因。
 
-`run_status.sh` 的三段判据：
+判断用**一条 ssh**：
 
-```
-DONE 存在              → DONE
-pid 进程已死           → CRASHED
-日志超过 STALL_HOURS 未更新 → STALLED
-否则                   → RUNNING
+```bash
+test -f '<路径>/DONE' && echo DONE || { kill -0 <pid> 2>/dev/null && echo RUNNING || echo CRASHED; }
 ```
 
-`STALLED` 对两天以上的长跑意外地有用（GPU hang、死锁都是这个症状）。
+| 输出 | 含义 |
+|---|---|
+| `DONE` | 有 DONE 文件（不管进程是否还在收尾） |
+| `RUNNING` | 没 DONE 但进程活着 |
+| `CRASHED` | 没 DONE 且进程没了 ← pid 的价值：立刻发现，不等超时 |
+| `NOPID` | 没登记 pid，只能靠 DONE + 超时 |
 
-## 6. 防烧钱的两道闸
+pid **可选**：Slurm / Docker 拿不到进程号就留空，退化为 `NOPID` + 超时兜底。
 
-1. **配置没填完时 `/rl start` 直接拒绝** —— 否则 `statusCommand` 是 `TODO`，每次轮询都会失败并升级唤醒，几分钟烧一轮。
-2. **异常升级每次轮询会话只做一次** —— ssh 长期故障时，如果每次失败都唤醒，会变成每 60 秒一次完整 LLM 调用。
+实测过三态：在跑→`RUNNING`，被 kill→`CRASHED`，touch DONE→`DONE`。
+
+---
+
+## 6. 防静默失败
+
+table 模式完全依赖 agent 配合，漏一步实验就**永远不会被等，且没有任何报错**。这是它最大的风险，用这些兜底：
+
+### ① 超时兜底
+
+登记超过 `maxHours`（默认 72 小时）还没 DONE → 唤醒提醒。
+
+- 首次观察时间**落盘**（`.pi/runs-state.json`），否则 pi 一重启计时归零，长实验永远等不到超时
+- **只提醒一次**，之后标记为已处理不再重复（避免每分钟骚扰）
+- 超时后不再监控——已告诉你了，不能一直吵
+
+### ② `track_run` 工具
+
+把登记变成一次工具调用，比让 agent 手写文件可靠。校验绝对路径、pid 必须是数字、自动去重。
+
+### ③ 区分「文件不存在」和「ssh 挂了」
+
+直接用 `test -f` 的退出码判断的话，两者都会返回非零，会误报。
+所以实际跑 `... && echo YES || echo NO`，输出既不是也不是 → 判定 ssh 出问题。
+
+### ④ ssh 连续失败升级
+
+失败 3 次 → 唤醒 LLM 诊断。**每次轮询会话只升级一次**（`escalatedOnce`），否则 ssh 长期故障会每 60 秒烧一次。
+
+### ⑤ 合并窗口 + 去重
+
+两次唤醒至少间隔 60 秒；报过的路径进已处理名单，不重复叫。
+
+### ⑥ 配置未填拒绝启动
+
+`sshHost` 没填 → `/rl` 直接拒绝开始循环。
+
+---
 
 ## 7. 配置合并：占位值不覆盖
 
-配置查找顺序是「全局 → 项目级」，项目级覆盖全局。
+查找顺序「全局 → 项目级」，项目级覆盖全局。
 
-坑：`/rl init` 生成的项目级配置全是 `TODO`，如果直接覆盖，会把全局已填好的值冲掉 —— 而且看不出为什么扩展不启动。
+坑：项目级配置里全是 `TODO` 时，直接覆盖会把全局已填好的值冲掉。
+所以 `loadConfig()` **跳过值为 `PLACEHOLDER` 的键**，让「只填一部分的项目级配置」是安全的。
 
-所以 `loadConfig()` 里**跳过值为 `PLACEHOLDER` 的键**，让「只填一部分的项目级配置」是安全的。
+---
 
-## 8. 模型切换（未实现，设计已定）
+## 8. AGENTS.md 为什么特殊处理
 
-**不做成独立扩展，做成共享库 `lib/model-chain.ts`。**
+pi 在同一个目录里只加载**一份**上下文文件（`AGENTS.override.md` > `AGENTS.md` > `CLAUDE.md`）。
+所以项目里已经有 `AGENTS.md` 时，再放一个新文件**不会被读**。
 
-理由：库没有自己的生命周期（不会自己启动、自己判断何时干活），只在被调用时做事。做成独立扩展会自己监听 `agent_end`，和任务扩展重复监听 → 一轮换两次模型。
+而 table 模式完全依赖 agent 遵守规则——规则没进去 = 实验永远不会被等 = 静默失败。
+所以「已存在就跳过」是错的。
 
-**只用于长任务循环，不做全局自动切换。** 平时聊天手动 `/model`。
+`/rl setup` 的处理：
+
+```
+没有 AGENTS.md              → 创建
+有，但没有标记块            → 末尾追加 <!-- BEGIN/END research-loop --> 块（原有内容不动）
+有标记块                    → 原地替换那一块（幂等，重跑不会堆积）
+```
+
+实测三态：新建 / 追加（原有内容保留）/ 更新（块只出现 1 次，是最新版）。
+
+---
+
+## 9. 模型切换（未实现，设计已定）
+
+**做成共享库 `lib/model-chain.ts`，不做成独立扩展。**
+
+理由：库没有自己的生命周期，只在被调用时做事。做成独立扩展会自己监听 `agent_end`，和任务扩展重复监听 → 一轮换两次模型。
+
+**只用于长任务循环，不做全局自动切换。**
 
 ### 判断该不该换模型
 
@@ -130,31 +194,28 @@ pid 进程已死           → CRASHED
 | 网络问题 | `fetch failed`、`connection`、`timeout` | **重试，不换** |
 | 真限额 | `usage limit`、`rate limit`、`quota`、`Try again in ~XX min` | **换模型** |
 
-ChatGPT 那家的限额文案：
-
-```
-You have hit your ChatGPT usage limit (plus plan). Try again in ~137 min.
-```
-
-pi 从 `usage_limit_reached` / `usage_not_included` / `rate_limit_exceeded` 或 HTTP 429 识别，响应里有 **`resets_at`** 字段（额度恢复时间戳）——**冷却系统应该读这个，不要硬编码 5 小时**。
+响应里有 `resets_at`（额度恢复时间戳）——**冷却系统应读这个，不要硬编码 5 小时**。
 
 ⚠️ 换机器时 `auth.json` 不同步，排序链里的模型必须都已登录，否则 `setModel` 返回 false，切换链静默失败。
 
-## 9. pi 扩展 API 速查
+---
+
+## 10. pi 扩展 API 速查
 
 | 方法 | 作用 |
 |---|---|
 | `pi.registerTool(tool)` | 注册工具让 agent 调用 |
 | `pi.registerCommand(name, { description, handler })` | 注册 `/xxx` 命令 |
 | `pi.on(事件, handler)` | 监听事件 |
-| `pi.setModel(model)` | 切模型，返回 `Promise<boolean>`（false = 没配鉴权） |
+| `pi.setModel(model)` | 切模型，返回 `Promise<boolean>` |
 | `pi.sendUserMessage(content, { deliverAs })` | 发用户消息，唤醒一轮 |
 | `pi.exec(cmd, args, options)` | 跑 shell 命令 |
 | `pi.appendEntry(customType, data)` | 往会话写自定义记录 |
-| `ctx.modelRegistry.getAvailable()` / `.find()` / `.complete()` | 模型相关 |
+| `ctx.ui.input(title, placeholder)` | **await 的文本输入**（`setup` 靠它做交互式向导） |
+| `ctx.ui.confirm(title, message)` | **await 的确认**（装公钥时原地等） |
 | `ctx.ui.notify(msg, level)` | 弹通知 |
+| `ctx.mode` | `"tui"` / 非交互模式 |
 | `ctx.isIdle()` / `ctx.hasUI` | 状态查询 |
-| `ctx.abort()` / `ctx.hasPendingMessages()` / `ctx.getContextUsage()` | 控制与查询 |
 
 `deliverAs`：`"followUp"` 排队等 agent 干完再投递（**从定时器里唤醒必须用这个**）；`"steer"` 立即打断。
 
@@ -165,11 +226,29 @@ pi 从 `usage_limit_reached` / `usage_not_included` / `rate_limit_exceeded` 或 
 | `packages/coding-agent/src/core/extensions/types.ts` | 扩展 API 全部类型 |
 | `packages/coding-agent/src/core/extensions/loader.ts` | 扩展发现与加载（jiti） |
 | `packages/coding-agent/src/core/session-manager.ts` | `buildSessionContext()` 历史装配 |
-| `packages/ai/src/api/transform-messages.ts` | 跨模型消息转换 |
 | `packages/coding-agent/examples/extensions/` | 官方示例（60+ 个） |
 
-## 10. 开发原则
+---
 
-1. **先具体后抽象。** 没写过一个能跑的扩展就设计库 = 凭空猜接口。共享库等第二个消费者出现再抽。
-2. **领域判断归人。** 指标定义、什么算「变好」、哪些方法不值得试——这些写在 `goal.md` 里由人维护，不要硬编码进扩展。
-3. **扩展只做机制。** 它不该认识任何领域概念。
+## 11. dir 模式（baseline 预留）
+
+`mode: "dir"` 切换到：固定 runs 目录 + `server/run_exp.sh` / `run_status.sh`。
+
+它强制统一的 run 目录结构，适合**流程固定的批量跑**（比如 baseline）。代价是假设了"单机 nohup + bash + 日志到 stdout"，Slurm / Docker 下不成立。
+
+已知未修的问题（table 模式不受影响）：
+
+1. `run id` 并发会撞（扫目录取最大值 + 建目录不是原子的）
+2. `STALL_HOURS` 默认 2 小时，对长 epoch 训练会误报
+3. `DONE` 写入有竞态（重定向先建空文件，可能读到空的 DONE）
+
+`server/test.sh` 是这两个脚本的回归测试（**写了没跑过**）。
+
+---
+
+## 12. 开发原则
+
+1. **扩展只做机制，不做领域判断。** 指标怎么算、什么算"变好"、该往哪个方向试——全在 `AGENTS.md` 和 `goal.md` 里由人维护。
+2. **能交给 agent 的就交给 agent。** 每多一处扩展自己操作服务器，就多一份兼容性负担。现在扩展里的 ssh 只剩轮询一处。
+3. **先具体后抽象。** 共享库等第二个消费者出现再抽。
+4. **沉默的失败最贵。** 任何"没报错但也没动静"的路径都要有兜底（超时、升级、去重）。

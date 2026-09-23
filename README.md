@@ -236,6 +236,7 @@ Key design: **the extension only polls and wakes — it never judges.** Polling 
 |---|---|
 | [docs/setup-windows.md](docs/setup-windows.md) | **要在 Windows 上跑起来的人**——从零到循环跑通的完整清单 |
 | [docs/internals.md](docs/internals.md) | 要继续开发这个扩展的人——实测确认过的机制、踩过的坑、未实现的设计 |
+| [docs/reference.md](docs/reference.md) | **完整清单**——所有命令、工具、配置项、文件，一页查全 |
 
 ## 路线图
 
