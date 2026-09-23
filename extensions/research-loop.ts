@@ -148,20 +148,13 @@ function handleSshFailure(pi: ExtensionAPI, res: { err: string; out: string }): 
 	}
 }
 
-/** 某个路径下 DONE 存在吗。返回 undefined = ssh 本身出问题 */
-async function remoteHasDone(path: string): Promise<boolean | undefined> {
-	const res = await runSsh(
-		cfg.sshHost,
-		`test -f ${shellQuote(`${path}/DONE`)} && echo YES || echo NO`,
-		cfg.sshTimeoutSec,
-	);
-	const out = res.out.trim();
-	if (out === "YES") return true;
-	if (out === "NO") return false;
-	return undefined;
+/** 待检查表里的一行：路径 + 可选的服务器进程号 */
+interface TableEntry {
+	path: string;
+	pid?: string;
 }
 
-/** agent 维护的待检查表（一行一个服务器绝对路径） */
+/** agent 维护的待检查表：一行一个服务器绝对路径，空格/Tab 后可跟 pid */
 function readRunsTable(): string[] {
 	const file = join(process.cwd(), cfg.runsFile);
 	if (!existsSync(file)) return [];
@@ -169,6 +162,40 @@ function readRunsTable(): string[] {
 		.split("\n")
 		.map((l) => l.trim())
 		.filter((l) => l && !l.startsWith("#"));
+}
+
+function parseTableEntries(): TableEntry[] {
+	return readRunsTable().map((line) => {
+		const parts = line.split(/\s+/);
+		// 最后一个 token 是纯数字 → 当成 pid（这样路径里带空格也不会被拆坏）
+		if (parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1] ?? "")) {
+			const pid = parts.pop();
+			return { path: parts.join(" "), pid };
+		}
+		return { path: line };
+	});
+}
+
+type TableState = "DONE" | "RUNNING" | "CRASHED" | "NOPID" | "UNKNOWN";
+
+/**
+ * 一次 ssh 判出三态：
+ *   DONE     有 DONE 文件（不管进程还在不在收尾）
+ *   RUNNING  没 DONE 但进程活着
+ *   CRASHED  没 DONE 且进程没了 ← pid 的价值就在这，立刻发现，不用等超时
+ *   NOPID    没登记 pid（Slurm/Docker 场景），只能靠 DONE + 超时
+ *   UNKNOWN  ssh 本身出问题
+ */
+async function remoteRunState(entry: TableEntry): Promise<TableState> {
+	const done = shellQuote(`${entry.path}/DONE`);
+	const hasPid = entry.pid !== undefined && /^\d+$/.test(entry.pid);
+	const cmd = hasPid
+		? `test -f ${done} && echo DONE || { kill -0 ${entry.pid} 2>/dev/null && echo RUNNING || echo CRASHED; }`
+		: `test -f ${done} && echo DONE || echo NOPID`;
+	const res = await runSsh(cfg.sshHost, cmd, cfg.sshTimeoutSec);
+	const out = res.out.trim();
+	if (out === "DONE" || out === "RUNNING" || out === "CRASHED" || out === "NOPID") return out;
+	return "UNKNOWN";
 }
 
 /**
@@ -179,40 +206,54 @@ function readRunsTable(): string[] {
  * 也不要求日志写到哪——兼容性全靠这个。
  */
 async function pollTable(pi: ExtensionAPI): Promise<void> {
-	const paths = readRunsTable();
-	forget(watch, paths);
+	const entries = parseTableEntries();
+	forget(watch, entries.map((e) => e.path));
 
-	if (paths.length === 0) {
+	if (entries.length === 0) {
 		lastStatus = `${cfg.runsFile} 为空，没有在跑的实验`;
 		return;
 	}
 
 	let running = 0;
-	for (const p of paths) {
-		if (watch.handled.includes(p)) continue;
+	for (const e of entries) {
+		if (watch.handled.includes(e.path)) continue;
 
-		const has = await remoteHasDone(p);
-		if (has === undefined) {
+		const st = await remoteRunState(e);
+		if (st === "UNKNOWN") {
 			handleSshFailure(pi, { err: "", out: "" });
 			return;
 		}
 		sshFailCount = 0;
 
-		if (has) {
-			pending.push({ key: p, lines: [`- 完成：${p}`, `  读 ${p}/DONE 看结果。`] });
+		if (st === "DONE") {
+			pending.push({ key: e.path, lines: [`- 完成：${e.path}`, `  读 ${e.path}/DONE 看结果。`] });
 			continue;
 		}
 
-		// 超时兜底：没有 pid 可查，只能靠时间。防止「忘了写 DONE」变成永久静默。
-		const started = touch(watch, p);
+		if (st === "CRASHED") {
+			pending.push({
+				key: e.path,
+				lines: [
+					`- 崩溃：${e.path}`,
+					`  进程 ${e.pid} 已不存在，且没有 DONE。`,
+					`  去读它的日志定位原因，然后把这行从 ${cfg.runsFile} 删掉。`,
+				],
+			});
+			continue;
+		}
+
+		// RUNNING 或 NOPID：只能靠时间兜底，防「忘了写 DONE」变成永久静默
+		const started = touch(watch, e.path);
 		const hours = (Date.now() - started) / 3600000;
 		if (hours > cfg.maxHours) {
 			pending.push({
-				key: p,
+				key: e.path,
 				lines: [
-					`- 超时：${p}`,
+					`- 超时：${e.path}`,
 					`  登记已 ${Math.round(hours)} 小时，仍没有 DONE。`,
-					`  去查：是崩了、卡了，还是训练代码忘了写 DONE？`,
+					st === "NOPID"
+						? `  没登记 pid，无法判断进程是否还活着。去查：崩了、卡了，还是忘了写 DONE？`
+						: `  进程还在但没有 DONE。去查：卡住了，还是训练代码忘了写 DONE？`,
 				],
 			});
 			continue;
@@ -444,9 +485,10 @@ async function primeHandled(): Promise<void> {
 		}
 		return;
 	}
-	// table：把当前已经有 DONE 的标为已报过
-	for (const p of readRunsTable()) {
-		if (await remoteHasDone(p)) markHandled(watch, p);
+	// table：把当前已经终态的（DONE / CRASHED）标为已报过
+	for (const e of parseTableEntries()) {
+		const st = await remoteRunState(e);
+		if (st === "DONE" || st === "CRASHED") markHandled(watch, e.path);
 	}
 }
 
@@ -577,6 +619,12 @@ export default function (pi: ExtensionAPI) {
 		],
 		parameters: Type.Object({
 			path: Type.String({ description: "服务器上该实验输出目录的绝对路径" }),
+			pid: Type.Optional(
+				Type.String({
+					description:
+						"服务器上该实验的进程号。强烈建议填（nohup 起的话就是 echo $! 的值）——填了才能在崩溃时立刻发现，而不是等超时。Slurm/Docker 场景填不了就省略。",
+				}),
+			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			cfg = loadConfig();
@@ -588,13 +636,18 @@ export default function (pi: ExtensionAPI) {
 					details: { ok: false },
 				};
 			}
+			const rawPid = params.pid?.trim();
+			if (rawPid && !/^\d+$/.test(rawPid)) {
+				return { content: [{ type: "text", text: `pid 必须是数字（当前是 ${rawPid}）` }], details: { ok: false } };
+			}
 
+			const line = rawPid ? `${p}\t${rawPid}` : p;
 			const file = join(process.cwd(), cfg.runsFile);
 			try {
 				mkdirSync(dirname(file), { recursive: true });
-				const existing = readRunsTable();
-				if (!existing.includes(p)) {
-					appendFileSync(file, `${p}\n`);
+				const existing = parseTableEntries();
+				if (!existing.some((e) => e.path === p)) {
+					appendFileSync(file, `${line}\n`);
 				} else {
 					return {
 						content: [{ type: "text", text: `已在盯：${p}` }],
@@ -613,7 +666,9 @@ export default function (pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text",
-						text: `已登记：${p}\n轮询会盯 ${p}/DONE。实验结束时务必让它在那里写 DONE（改训练代码或命令末尾 touch）。`,
+						text: rawPid
+							? `已登记：${p}（pid ${rawPid}）\n轮询会盯 ${p}/DONE，同时盯进程是否还活着——崩了会立刻通知你。`
+							: `已登记：${p}（无 pid）\n轮询只盯 ${p}/DONE。崩了要等到 ${cfg.maxHours} 小时超时才会提醒，建议以后能填 pid 就填。`,
 					},
 				],
 				details: { ok: true },
