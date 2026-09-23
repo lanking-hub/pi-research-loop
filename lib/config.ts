@@ -8,6 +8,17 @@ export const CONFIG_NAME = "research-loop.json";
 export const PLACEHOLDER = "TODO";
 
 export interface Config {
+	/**
+	 * 两种盯实验的方式：
+	 * - "table"（默认，迭代用）：agent 在 `runsFile` 里登记正在跑的实验路径，
+	 *   轮询只检查这些路径下有没有 DONE。不假设实验怎么起，兼容性最好。
+	 * - "dir"（baseline 用）：固定的 runs 目录 + 服务器脚本，结构强制统一。
+	 */
+	mode: "table" | "dir";
+	/** table 模式：agent 维护的待检查表，一行一个服务器绝对路径 */
+	runsFile: string;
+	/** table 模式：登记后超过这么久还没 DONE 就提醒（兜底，防静默失联） */
+	maxHours: number;
 	/** ~/.ssh/config 里配好的服务器 Host 别名（免密 key） */
 	sshHost: string;
 	/** 服务器上 runs 目录的绝对路径 */
@@ -28,6 +39,9 @@ export interface Config {
 }
 
 export const DEFAULTS: Config = {
+	mode: "table",
+	runsFile: ".auto/runs.txt",
+	maxHours: 72,
 	sshHost: PLACEHOLDER,
 	runsPath: PLACEHOLDER,
 	statusCommand: PLACEHOLDER,
@@ -68,5 +82,8 @@ export function loadConfig(): Config {
 }
 
 export function isConfigured(c: Config): boolean {
-	return c.sshHost !== PLACEHOLDER && c.runsPath !== PLACEHOLDER && c.statusCommand !== PLACEHOLDER;
+	if (c.sshHost === PLACEHOLDER) return false;
+	// dir 模式还需要固定目录和状态脚本；table 模式只要能连上服务器就够了
+	if (c.mode === "dir") return c.runsPath !== PLACEHOLDER && c.statusCommand !== PLACEHOLDER;
+	return true;
 }

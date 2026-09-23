@@ -28,6 +28,27 @@
 
 ---
 
+## 两种盯实验的方式
+
+| | **table 模式**（默认，迭代用） | **dir 模式**（baseline 用） |
+|---|---|---|
+| 怎么起实验 | **你 / agent 决定**——`nohup`、`sbatch`、`docker`、`conda` 都行 | 固定的 `run_exp.sh` |
+| 扩展盯什么 | `.auto/runs.txt` 里登记的路径下有没有 `DONE` | 固定 runs 目录 + 服务器脚本报状态 |
+| 要在服务器部署脚本吗 | **不需要** | 需要 `server/*.sh` |
+| 必填配置 | 只有 `sshHost` | `sshHost` + `runsPath` + `statusCommand` |
+| 适合 | 变数多的迭代探索 | 流程固定的批量跑 |
+
+**table 模式只认一个约定**：实验跑完时，在它的输出目录里写一个 `DONE` 文件（内容随便，建议放指标）。
+
+怎么起实验完全不限制——所以 Slurm、Docker、多机、conda 环境全都支持。兼容性来自"不管你怎么起"。
+
+配套的：
+
+- `track_run` 工具 —— 起完实验登记路径，一次调用
+- 超时兜底 —— 登记超过 `maxHours`（默认 72 小时）还没 DONE 就提醒，防"忘了写 DONE"变成永久静默
+
+切换：配置里 `"mode": "table"` 或 `"dir"`。
+
 ## 安装
 
 ```bash

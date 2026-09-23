@@ -30,7 +30,7 @@
  * 会被 pi 加载两次，导致重复唤醒。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -38,12 +38,24 @@ import { isConfigured, loadConfig, PLACEHOLDER, type Config } from "../lib/confi
 import { templatesDir } from "../lib/paths.ts";
 import { expandRemotePath, remoteHome, runSsh } from "../lib/ssh.ts";
 import { runSetup } from "../lib/setup.ts";
+import { forget, loadState, markHandled, touch, type RunWatch } from "../lib/state.ts";
 
 type RunState = "RUNNING" | "DONE" | "CRASHED" | "STALLED" | "UNKNOWN";
 
 interface RunStatus {
 	id: string;
 	state: RunState;
+}
+
+/** 待唤醒队列里的一项：已经拼好的说明文字（两种模式各自生成） */
+interface PendingItem {
+	key: string;
+	lines: string[];
+}
+
+/** 给远程 shell 用的单引号包裹（路径里可能含空格） */
+function shellQuote(s: string): string {
+	return `'${s.replace(/'/g, `'\''`)}'`;
 }
 
 /** 解析状态脚本输出：每行 "<runId> <STATE>" */
@@ -71,8 +83,8 @@ function parseStatus(out: string): RunStatus[] {
 let cfg: Config = loadConfig();
 let timer: ReturnType<typeof setInterval> | undefined;
 let polling = false;
-let pending: RunStatus[] = [];
-let handled = new Set<string>();
+let watch: RunWatch = loadState();
+let pending: PendingItem[] = [];
 let escalatedOnce = new Set<string>();
 let sshFailCount = 0;
 let lastWakeAt = 0;
@@ -87,25 +99,15 @@ function notify(msg: string, level: "info" | "warning" | "error" = "info"): void
 	}
 }
 
-function buildWakeMessage(batch: RunStatus[]): string {
-	const lines: string[] = ["有实验 run 状态变化，请处理。", ""];
-	for (const r of batch) {
-		const dir = `${cfg.runsPath}/${r.id}`;
-		if (r.state === "DONE") {
-			lines.push(`- ${r.id}：完成。读 ${dir}/DONE 和 ${dir}/log.txt 看结果。`);
-		} else if (r.state === "CRASHED") {
-			lines.push(`- ${r.id}：崩溃。读 ${dir}/log.txt 定位报错。`);
-		} else if (r.state === "STALLED") {
-			lines.push(`- ${r.id}：疑似卡死（日志长时间未更新）。检查后决定杀掉还是继续等。`);
-		} else {
-			lines.push(`- ${r.id}：状态未知。请自行 ssh 到 ${cfg.sshHost} 检查 ${dir}。`);
-		}
-	}
+function buildWakeMessage(batch: PendingItem[]): string {
+	const lines: string[] = ["有实验状态变化，请处理。", ""];
+	for (const item of batch) lines.push(...item.lines);
 	lines.push("");
 	lines.push("然后：");
 	lines.push("1. 按 AGENTS.md 更新 .auto/notes.md（每轮重写，含死胡同）");
 	lines.push("2. 用 gpu_status 查实时空闲卡，按 .auto/goal.md 决定下一步");
-	lines.push("3. 起新的实验（并发上限与卡占用规则见 .auto/goal.md）");
+	lines.push("3. 处理完的实验，把它从 .auto/runs.txt 里删掉");
+	lines.push("4. 起新实验时记得调 track_run 登记");
 	return lines.join("\n");
 }
 
@@ -123,32 +125,112 @@ function maybeWake(pi: ExtensionAPI): void {
 	if (pending.length === 0) return;
 	if (Date.now() - lastWakeAt < cfg.mergeWindowSec * 1000) return;
 	const batch = pending.splice(0, pending.length);
-	for (const b of batch) handled.add(b.id);
+	for (const b of batch) markHandled(watch, b.key);
 	wake(pi, buildWakeMessage(batch));
 }
 
-async function poll(pi: ExtensionAPI): Promise<void> {
-	const res = await runSsh(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
+/** ssh 出问题（不是"文件不存在"，是连不上/命令跑不了）时统一处理 */
+function handleSshFailure(pi: ExtensionAPI, res: { err: string; out: string }): void {
+	sshFailCount += 1;
+	lastStatus = `ssh 失败 ${sshFailCount}/${cfg.sshFailEscalate}`;
+	if (sshFailCount >= cfg.sshFailEscalate) {
+		sshFailCount = 0;
+		wake(
+			pi,
+			[
+				`轮询 ssh 连续失败 ${cfg.sshFailEscalate} 次，无法确认实验状态。`,
+				`最后错误：${(res.err.trim() || res.out.trim() || "(无输出)").slice(0, 500)}`,
+				"",
+				`请诊断：ssh ${cfg.sshHost} 是否可用、别名是否配对、服务器是否可达。`,
+			].join("\n"),
+			"ssh",
+		);
+	}
+}
 
-	if (!res.ok) {
-		sshFailCount += 1;
-		lastStatus = `ssh 失败 ${sshFailCount}/${cfg.sshFailEscalate}`;
-		if (sshFailCount >= cfg.sshFailEscalate) {
-			sshFailCount = 0;
-			wake(
-				pi,
-				[
-					`轮询 ssh 连续失败 ${cfg.sshFailEscalate} 次，无法确认实验状态。`,
-					`最后错误：${(res.err.trim() || res.out.trim() || "(无输出)").slice(0, 500)}`,
-					"",
-					`请诊断：ssh ${cfg.sshHost} 是否可用、${cfg.statusCommand} 是否存在且有执行权限、${cfg.runsPath} 是否正确。`,
-				].join("\n"),
-				"ssh",
-			);
-		}
+/** 某个路径下 DONE 存在吗。返回 undefined = ssh 本身出问题 */
+async function remoteHasDone(path: string): Promise<boolean | undefined> {
+	const res = await runSsh(
+		cfg.sshHost,
+		`test -f ${shellQuote(`${path}/DONE`)} && echo YES || echo NO`,
+		cfg.sshTimeoutSec,
+	);
+	const out = res.out.trim();
+	if (out === "YES") return true;
+	if (out === "NO") return false;
+	return undefined;
+}
+
+/** agent 维护的待检查表（一行一个服务器绝对路径） */
+function readRunsTable(): string[] {
+	const file = join(process.cwd(), cfg.runsFile);
+	if (!existsSync(file)) return [];
+	return readFileSync(file, "utf8")
+		.split("\n")
+		.map((l) => l.trim())
+		.filter((l) => l && !l.startsWith("#"));
+}
+
+/**
+ * table 模式（默认，迭代用）
+ *
+ * 只认一个约定：登记的路径下出现 DONE 就算完成。
+ * 不假设实验怎么起（nohup / sbatch / docker 都行），
+ * 也不要求日志写到哪——兼容性全靠这个。
+ */
+async function pollTable(pi: ExtensionAPI): Promise<void> {
+	const paths = readRunsTable();
+	forget(watch, paths);
+
+	if (paths.length === 0) {
+		lastStatus = `${cfg.runsFile} 为空，没有在跑的实验`;
 		return;
 	}
 
+	let running = 0;
+	for (const p of paths) {
+		if (watch.handled.includes(p)) continue;
+
+		const has = await remoteHasDone(p);
+		if (has === undefined) {
+			handleSshFailure(pi, { err: "", out: "" });
+			return;
+		}
+		sshFailCount = 0;
+
+		if (has) {
+			pending.push({ key: p, lines: [`- 完成：${p}`, `  读 ${p}/DONE 看结果。`] });
+			continue;
+		}
+
+		// 超时兜底：没有 pid 可查，只能靠时间。防止「忘了写 DONE」变成永久静默。
+		const started = touch(watch, p);
+		const hours = (Date.now() - started) / 3600000;
+		if (hours > cfg.maxHours) {
+			pending.push({
+				key: p,
+				lines: [
+					`- 超时：${p}`,
+					`  登记已 ${Math.round(hours)} 小时，仍没有 DONE。`,
+					`  去查：是崩了、卡了，还是训练代码忘了写 DONE？`,
+				],
+			});
+			continue;
+		}
+		running += 1;
+	}
+
+	lastStatus = `在跑 ${running}，待处理 ${pending.length}`;
+	maybeWake(pi);
+}
+
+/** dir 模式：固定 runs 目录 + 服务器脚本（baseline 那种死流程用） */
+async function pollDir(pi: ExtensionAPI): Promise<void> {
+	const res = await runSsh(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
+	if (!res.ok) {
+		handleSshFailure(pi, res);
+		return;
+	}
 	sshFailCount = 0;
 
 	const runs = parseStatus(res.out);
@@ -161,7 +243,6 @@ async function poll(pi: ExtensionAPI): Promise<void> {
 				(res.out.trim() || "(空)").slice(0, 500),
 				"",
 				'期望格式：每行 "<runId> <STATE>"，STATE ∈ RUNNING|DONE|CRASHED|STALLED。',
-				`请检查服务器上的 ${cfg.statusCommand}。`,
 			].join("\n"),
 			"parse",
 		);
@@ -169,7 +250,17 @@ async function poll(pi: ExtensionAPI): Promise<void> {
 	}
 
 	for (const r of runs) {
-		if (r.state !== "RUNNING" && !handled.has(r.id)) pending.push(r);
+		if (r.state === "RUNNING" || watch.handled.includes(r.id)) continue;
+		const dir = `${cfg.runsPath}/${r.id}`;
+		const text =
+			r.state === "DONE"
+				? [`- ${r.id}：完成。读 ${dir}/DONE 和 ${dir}/log.txt 看结果。`]
+				: r.state === "CRASHED"
+					? [`- ${r.id}：崩溃。读 ${dir}/log.txt 定位报错。`]
+					: r.state === "STALLED"
+						? [`- ${r.id}：疑似卡死（日志长时间未更新）。检查后决定杀掉还是继续等。`]
+						: [`- ${r.id}：状态未知。请自行 ssh 到 ${cfg.sshHost} 检查 ${dir}。`];
+		pending.push({ key: r.id, lines: text });
 	}
 
 	const running = runs.filter((r) => r.state === "RUNNING").length;
@@ -185,6 +276,11 @@ async function poll(pi: ExtensionAPI): Promise<void> {
 	maybeWake(pi);
 }
 
+async function poll(pi: ExtensionAPI): Promise<void> {
+	if (cfg.mode === "dir") await pollDir(pi);
+	else await pollTable(pi);
+}
+
 /**
  * 逐项实测环境，把「首次配置清单」变成自动检查。
  * 只做只读检查，不启动任何东西。
@@ -196,9 +292,11 @@ async function doctor(): Promise<void> {
 
 	const missing: string[] = [];
 	if (cfg.sshHost === PLACEHOLDER) missing.push("sshHost");
-	if (cfg.runsPath === PLACEHOLDER) missing.push("runsPath");
-	if (cfg.statusCommand === PLACEHOLDER) missing.push("statusCommand");
-	if (cfg.startCommand === PLACEHOLDER) missing.push("startCommand");
+	// dir 模式才需要固定目录和状态脚本；table 模式只要能连上服务器
+	if (cfg.mode === "dir") {
+		if (cfg.runsPath === PLACEHOLDER) missing.push("runsPath");
+		if (cfg.statusCommand === PLACEHOLDER) missing.push("statusCommand");
+	}
 
 	if (missing.length > 0) {
 		problems += 1;
@@ -217,33 +315,43 @@ async function doctor(): Promise<void> {
 			lines.push("  检查：~/.ssh/config 有这个 Host 吗？配了免密 key 吗？");
 		}
 
-		// ~/ 在带引号的命令里不会被 shell 展开，先自己展开再查
-		const home = await remoteHome(cfg.sshHost, cfg.sshTimeoutSec);
-		const runsAbs = expandRemotePath(cfg.runsPath, home);
-		const dir = await runSsh(
-			cfg.sshHost,
-			`test -d ${JSON.stringify(runsAbs)} && echo yes || echo no`,
-			cfg.sshTimeoutSec,
-		);
-		if (dir.out.trim() === "yes") {
-			lines.push(`✓ runs 目录存在：${runsAbs}`);
-		} else {
-			problems += 1;
-			lines.push(`✗ runs 目录不存在：${runsAbs}`);
-			lines.push(`  服务器上先 mkdir -p ${runsAbs}`);
-			lines.push(`  （配置里写的是 ${cfg.runsPath}；带引号时 ~ 不会展开，建议直接写绝对路径）`);
-		}
+		if (cfg.mode === "dir") {
+			// ~/ 在带引号的命令里不会被 shell 展开，先自己展开再查
+			const home = await remoteHome(cfg.sshHost, cfg.sshTimeoutSec);
+			const runsAbs = expandRemotePath(cfg.runsPath, home);
+			const dir = await runSsh(
+				cfg.sshHost,
+				`test -d ${JSON.stringify(runsAbs)} && echo yes || echo no`,
+				cfg.sshTimeoutSec,
+			);
+			if (dir.out.trim() === "yes") {
+				lines.push(`✓ runs 目录存在：${runsAbs}`);
+			} else {
+				problems += 1;
+				lines.push(`✗ runs 目录不存在：${runsAbs}`);
+				lines.push(`  服务器上先 mkdir -p ${runsAbs}`);
+				lines.push(`  （配置里写的是 ${cfg.runsPath}；带引号时 ~ 不会展开，建议直接写绝对路径）`);
+			}
 
-		const st = await runSsh(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
-		if (!st.ok) {
-			problems += 1;
-			lines.push("✗ statusCommand 执行失败");
-			lines.push(`  ${(st.err.trim() || st.out.trim() || "无输出").slice(0, 200)}`);
-			lines.push("  检查：脚本传上去了吗？chmod +x 了吗？RUNS_DIR 对吗？");
-		} else if (parseStatus(st.out).length === 0) {
-			lines.push("-- statusCommand 能跑，但还没有任何 run（没跑过实验时正常）");
+			const st = await runSsh(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
+			if (!st.ok) {
+				problems += 1;
+				lines.push("✗ statusCommand 执行失败");
+				lines.push(`  ${(st.err.trim() || st.out.trim() || "无输出").slice(0, 200)}`);
+				lines.push("  检查：脚本传上去了吗？chmod +x 了吗？RUNS_DIR 对吗？");
+			} else if (parseStatus(st.out).length === 0) {
+				lines.push("-- statusCommand 能跑，但还没有任何 run（没跑过实验时正常）");
+			} else {
+				lines.push(`✓ statusCommand 正常，${parseStatus(st.out).length} 个 run`);
+			}
 		} else {
-			lines.push(`✓ statusCommand 正常，${parseStatus(st.out).length} 个 run`);
+			// table 模式：看登记表在不在、里面有没有路径
+			const table = readRunsTable();
+			if (table.length === 0) {
+				lines.push(`-- ${cfg.runsFile} 不存在或为空（还没登记任何实验，正常）`);
+			} else {
+				lines.push(`✓ ${cfg.runsFile} 有 ${table.length} 个在跑的实验`);
+			}
 		}
 
 		const gpu = await runSsh(cfg.sshHost, cfg.gpuCommand, cfg.sshTimeoutSec);
@@ -286,6 +394,7 @@ function init(): void {
 		{ from: "AGENTS.research.md", to: "AGENTS.md", hint: "agent 规则" },
 		{ from: "goal.md", to: join(".auto", "goal.md"), hint: "你写方向" },
 		{ from: "notes.md", to: join(".auto", "notes.md"), hint: "agent 写进度" },
+		{ from: "runs.txt", to: join(".auto", "runs.txt"), hint: "正在跑的实验路径（agent 增删）" },
 		{ from: "research-loop.json", to: join(".pi", "research-loop.json"), hint: "项目级配置" },
 	];
 
@@ -327,17 +436,24 @@ function init(): void {
  * 一次性唤醒几百条通知。
  */
 async function primeHandled(): Promise<void> {
-	const res = await runSsh(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
-	if (!res.ok) return;
-	for (const r of parseStatus(res.out)) {
-		if (r.state !== "RUNNING") handled.add(r.id);
+	if (cfg.mode === "dir") {
+		const res = await runSsh(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
+		if (!res.ok) return;
+		for (const r of parseStatus(res.out)) {
+			if (r.state !== "RUNNING") markHandled(watch, r.id);
+		}
+		return;
+	}
+	// table：把当前已经有 DONE 的标为已报过
+	for (const p of readRunsTable()) {
+		if (await remoteHasDone(p)) markHandled(watch, p);
 	}
 }
 
 async function startPolling(pi: ExtensionAPI): Promise<void> {
 	if (polling) return;
 	polling = true;
-	handled = new Set();
+	watch = loadState();
 	escalatedOnce = new Set();
 	sshFailCount = 0;
 	await primeHandled();
@@ -374,7 +490,12 @@ export default function (pi: ExtensionAPI) {
 
 			if (a === "start") {
 				if (!isConfigured(cfg)) {
-					notify("配置未完成，先填 sshHost / runsPath / statusCommand", "warning");
+					notify(
+						cfg.mode === "dir"
+							? "配置未完成，先填 sshHost / runsPath / statusCommand"
+							: "配置未完成，先填 sshHost",
+						"warning",
+					);
 					return;
 				}
 				await startPolling(pi);
@@ -440,6 +561,63 @@ export default function (pi: ExtensionAPI) {
 				? res.out.trim() || "(空输出)"
 				: `ssh 失败：${res.err.trim() || res.out.trim() || "(无输出)"}`;
 			return { content: [{ type: "text", text }], details: { ok: res.ok } };
+		},
+	});
+
+	pi.registerTool({
+		name: "track_run",
+		label: "Track Run",
+		description:
+			"登记一个正在跑的实验路径（服务器上的绝对路径），轮询会盯它有没有出现 DONE 文件。起完实验必须调这个，否则没人会等它。",
+		promptSnippet: "登记一个正在跑的实验路径，让轮询盯它",
+		promptGuidelines: [
+			"起完实验必须调 track_run 登记路径，否则扩展不会盯它，实验会静默失联",
+			"必须保证实验结束时会在该路径下写 DONE 文件（改训练代码，或命令末尾 touch）",
+			"实验处理完把它从 .auto/runs.txt 里删掉",
+		],
+		parameters: Type.Object({
+			path: Type.String({ description: "服务器上该实验输出目录的绝对路径" }),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			cfg = loadConfig();
+			const p = params.path.trim();
+			if (!p) return { content: [{ type: "text", text: "path 不能为空" }], details: { ok: false } };
+			if (!p.startsWith("/")) {
+				return {
+					content: [{ type: "text", text: `path 必须是服务器上的绝对路径（当前是 ${p}）` }],
+					details: { ok: false },
+				};
+			}
+
+			const file = join(process.cwd(), cfg.runsFile);
+			try {
+				mkdirSync(dirname(file), { recursive: true });
+				const existing = readRunsTable();
+				if (!existing.includes(p)) {
+					appendFileSync(file, `${p}\n`);
+				} else {
+					return {
+						content: [{ type: "text", text: `已在盯：${p}` }],
+						details: { ok: true, already: true },
+					};
+				}
+			} catch (e) {
+				return {
+					content: [{ type: "text", text: `写入 ${cfg.runsFile} 失败：${e instanceof Error ? e.message : String(e)}` }],
+					details: { ok: false },
+				};
+			}
+
+			touch(watch, p);
+			return {
+				content: [
+					{
+						type: "text",
+						text: `已登记：${p}\n轮询会盯 ${p}/DONE。实验结束时务必让它在那里写 DONE（改训练代码或命令末尾 touch）。`,
+					},
+				],
+				details: { ok: true },
+			};
 		},
 	});
 
