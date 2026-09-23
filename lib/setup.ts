@@ -85,39 +85,38 @@ function existingKey(): string | undefined {
 	return undefined;
 }
 
-function escapeRegExp(s: string): string {
-	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function hasHostLine(alias: string): boolean {
-	const p = sshConfigPath();
-	if (!existsSync(p)) return false;
-	return new RegExp(`^\\s*Host\\s+${escapeRegExp(alias)}\\s*$`, "m").test(readFileSync(p, "utf8"));
-}
-
 /**
- * 读出某个 Host 块里的 HostName。
+ * 找出某个别名所在的 Host 块。
  *
- * 这是**必需的兜底**：别名是固定的，万一用户 ~/.ssh/config 里已经有同名 Host
- * 且指向别的机器，沿用它会**静默连错服务器**——那比报错糟糕得多。
+ * **存在性判定和 HostName 读取必须用同一套解析**。以前是两个函数各写一套：
+ * 存在性用 `^\s*Host\s+<alias>\s*$`（要求整行只有这一个别名），
+ * 读 HostName 用「该行别名列表里包含」。于是 `Host a b` 这种多别名行会被判成
+ * 「不存在」→ 追加一个同名块 → ssh 采用**先出现的那一个**，可能连到别的机器。
+ *
+ * 这个兜底本身也是必需的：别名是固定的，万一用户 ~/.ssh/config 里已经有同名
+ * Host 且指向别的机器，沿用它会**静默连错服务器**——那比报错糟糕得多。
  */
-function aliasHostName(alias: string): string | undefined {
+function findAliasBlock(alias: string): { exists: boolean; hostName?: string } {
 	const p = sshConfigPath();
-	if (!existsSync(p)) return undefined;
+	if (!existsSync(p)) return { exists: false };
 	let inBlock = false;
+	let seen = false;
+	let hostName: string | undefined;
 	for (const raw of readFileSync(p, "utf8").split("\n")) {
 		const line = raw.trim();
 		if (/^Host\s+/i.test(line)) {
+			if (seen) return { exists: true, hostName }; // 别名块到此结束
 			inBlock = line.slice(5).trim().split(/\s+/).includes(alias);
+			if (inBlock) seen = true;
 			continue;
 		}
-		if (/^Match\s+/i.test(line)) {
+		if (/^(Match|Include)\s+/i.test(line)) {
 			inBlock = false;
 			continue;
 		}
-		if (inBlock && /^HostName\s+/i.test(line)) return line.slice(9).trim();
+		if (inBlock && /^HostName\s+/i.test(line)) hostName = line.slice(9).trim();
 	}
-	return undefined;
+	return { exists: seen, hostName };
 }
 
 function projectConfigPath(): string {
@@ -198,6 +197,24 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		}
 	}
 	const pubKeyPath = `${keyPath}.pub`;
+	if (!existsSync(pubKeyPath)) {
+		// 有私钥却没有 .pub（手工拷过、或 .pub 被删了）：从私钥反推一份。
+		// 不补的话下面那条「cat xxx.pub」命令必然失败，而用户不知道为什么。
+		const y = await exec(keygenBin, ["-y", "-f", keyPath], 10000);
+		const pub = y.out.trim();
+		if (y.ok && /^(ssh-|ecdsa-|sk-)/.test(pub)) {
+			mkdirSync(sshDir(), { recursive: true });
+			writeFileSync(pubKeyPath, `${pub}\n`);
+			lines.push(`✓ 私钥没有配套的 .pub，已从私钥补出：${pubKeyPath}`);
+		}
+	}
+	if (!existsSync(pubKeyPath)) {
+		problems += 1;
+		attention = true;
+		lines.push(`✗ 公钥文件不存在，也没法从私钥生成：${pubKeyPath}`);
+		lines.push(`  手动补：${keygenBin} -y -f ${keyPath} > ${pubKeyPath}`);
+		return { lines, done: false, needsAttention: true };
+	}
 
 	// ── 3. 只问两件事：服务器地址、用户名 ──────────────────
 	const host = (await ui.ask("服务器地址（IP 或域名）", "例如 192.168.1.50"))?.trim();
@@ -216,8 +233,9 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	const alias = cfg.sshHost || SSH_ALIAS;
 
 	// ── 4. 写 ~/.ssh/config（带冲突检测）───────────────────
-	if (hasHostLine(alias)) {
-		const existingHost = aliasHostName(alias);
+	const blk = findAliasBlock(alias);
+	if (blk.exists) {
+		const existingHost = blk.hostName;
 		if (existingHost && existingHost !== host) {
 			problems += 1;
 			attention = true;
@@ -239,6 +257,8 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 
 	// ── 5. 指纹登记 + 免密连通（卡住就在这里等，不要求重跑）──
 	let connected = false;
+	// 中途提示只发「本次新增的行」：lines 是累积的，每次全量重发会把前面说过的内容再刷一遍
+	let saidUpTo = 0;
 	for (let attempt = 1; attempt <= MAX_KEY_ATTEMPTS; attempt++) {
 		ui.status(`正在连接 ${user}@${host} …`);
 		let probe = await runRemote(alias, "echo __RL_OK__", 10);
@@ -266,15 +286,23 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 			: `cat ${pubKeyPath} | ssh ${user}@${host} "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"`;
 
 		lines.push("");
+		if (attempt > 1) {
+			lines.push(`第 ${attempt} 次仍连不上。若上面那条命令已跑过且没报错，`);
+			lines.push("多半不是公钥没装上，而是服务器端 ~/.ssh 权限不对。");
+		}
 		lines.push("还差一步：把公钥装到服务器（需要输一次服务器密码，之后永久免密）。");
 		lines.push("**另开一个终端**执行：");
 		lines.push(`  ${installCmd}`);
+		if (IS_WIN) {
+			lines.push("  ⚠ 在 **cmd.exe** 里执行 —— PowerShell 的 type 是另一个命令，行为不一样。");
+		}
 		lines.push("");
 
 		// 关键：confirm 是中途弹的，而报告要等 setup 跑完才统一输出。
 		// 不先把命令显示出来，用户会看到「执行上面那条命令」却看不到命令。
 		ui.status(undefined);
-		ui.say(lines.join("\n"));
+		ui.say(lines.slice(saidUpTo).join("\n"));
+		saidUpTo = lines.length;
 		const ok = await ui.confirm("公钥装好了吗？", `另开终端执行：\n\n  ${installCmd}\n\n输一次服务器密码。执行完选 Yes 继续。`);
 		if (!ok) {
 			lines.push("已取消。随时重跑 /rl setup 继续（前面的步骤会自动跳过）。");
@@ -366,10 +394,11 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	const patch: Partial<Config> = {
 		sshHost: alias,
 		runsPath,
-		statusCommand: `RUNS_DIR=${runsPath} ${REMOTE_BIN}/run_status.sh`,
+		// 路径加引号：不加的话路径里含空格会被 shell 拆成两段
+		statusCommand: `RUNS_DIR="${runsPath}" ${REMOTE_BIN}/run_status.sh`,
 	};
 	if (projectPath) {
-		patch.startCommand = `RUNS_DIR=${runsPath} PROJECT_DIR=${projectPath} ${REMOTE_BIN}/run_exp.sh`;
+		patch.startCommand = `RUNS_DIR="${runsPath}" PROJECT_DIR="${projectPath}" ${REMOTE_BIN}/run_exp.sh`;
 	}
 	writeProjectConfig(patch, lines);
 
