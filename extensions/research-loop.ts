@@ -319,12 +319,28 @@ function init(): void {
 	notify(lines.join("\n"), "info");
 }
 
-function startPolling(pi: ExtensionAPI): void {
+/**
+ * 启动时先把「历史上已经结束的 run」全部标记为已处理。
+ *
+ * runs 目录是永久累积的，而 handled 在内存里、pi 一重启就空。
+ * 不预热的话，重启后第一次轮询会把所有旧的已完成 run 当成「刚刚完成」，
+ * 一次性唤醒几百条通知。
+ */
+async function primeHandled(): Promise<void> {
+	const res = await runSsh(cfg.sshHost, cfg.statusCommand, cfg.sshTimeoutSec);
+	if (!res.ok) return;
+	for (const r of parseStatus(res.out)) {
+		if (r.state !== "RUNNING") handled.add(r.id);
+	}
+}
+
+async function startPolling(pi: ExtensionAPI): Promise<void> {
 	if (polling) return;
 	polling = true;
 	handled = new Set();
 	escalatedOnce = new Set();
 	sshFailCount = 0;
+	await primeHandled();
 	timer = setInterval(() => void poll(pi), cfg.pollIntervalSec * 1000);
 	void poll(pi);
 }
@@ -361,7 +377,7 @@ export default function (pi: ExtensionAPI) {
 					notify("配置未完成，先填 sshHost / runsPath / statusCommand", "warning");
 					return;
 				}
-				startPolling(pi);
+				await startPolling(pi);
 				notify("research-loop 已启动", "info");
 				return;
 			}
