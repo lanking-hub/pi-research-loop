@@ -13,7 +13,7 @@
 | `/rl stop` | 停止 |
 | `/rl status` | 两行：循环状态 + 实验状态 |
 | `/rl goal <文本>` | 往 goal 的「临时建议」加一条，下一轮 agent 自动读到 |
-| `/rl goal -t <工作流> <文本>` | 写到 `.auto/goal-<工作流>.md`（按工作流拆 goal 时用） |
+| `/rl goal -t <名字> <文本>` | 写到 `.auto/goal-<名字>.md`（一个项目里备好几份 goal 时才用） |
 | `/rl agents` | 已有 AGENTS.md 时让 agent 合并（去重 + 精简），背景放块外、规则逐字保留 |
 | `/rl models` | 编辑模型链（键盘排序，存全局配置）。额度耗尽时按链顺序自动切换 |
 | `/rl doctor` | 环境体检（只读） |
@@ -72,8 +72,8 @@ research-loop-server
 
 ```csv
 path,pid,track,note
-/data/proj/iter/outputs/exp12,88321,iter,试 CBAM 注意力
-/data/proj/baselines/methodA/out,88231,baseline,methodA / SYSU / seed0
+/data/proj/exp12,88321,骨干,换 Swin
+/data/proj/methodA/out,88231,methodA,SYSU / seed0
 ```
 
 | 列 | 必填 | 扩展怎么用 |
@@ -83,7 +83,7 @@ path,pid,track,note
 | `track` | 可选 | **只透传**，原样进唤醒消息 |
 | `note` | 可选 | **只透传**，原样进唤醒消息 |
 
-**`track` / `note` 扩展不解析含义**——它不知道 `iter` 和 `baseline` 是什么，只是把字符串搬进唤醒消息。作用只有一个：你被唤醒时一眼知道该读哪个 `goal`。
+**`track` / `note` 是自由标签，扩展不解析含义**——它不知道你写的是什么，只是把字符串原样搬进唤醒消息。作用只有一个：你被唤醒时一眼认出这是哪条实验。
 
 ### 格式怎么定的
 
@@ -96,20 +96,19 @@ path,pid,track,note
 
 想继续用旧格式就在配置里写 `"runsFile": ".auto/runs.txt"`，行为完全不变。
 
-### 多个工作流怎么共存
+### 一份表，不要拆
 
-一份表就行，不要拆成多份——拆了就要跑多个循环（= 多个 pi 实例），它们互相看不见，会抢同一批卡。
+一份表就行，不要拆成多份——拆了就要跑多个循环（= 多个 pi 实例），
+它们**互相看不见**，会抢同一批卡。
 
-用 `track` 列区分工作流，用 `note` 写清楚在试什么。
+**迭代和 baseline 不是两种模式**，只是 `goal.md` 里写的内容不同（示例见 README）。
+要分开做，最干净的做法是**一个会话一个控制台目录**——
+一个目录放迭代的 goal，另一个放 baseline 的 goal。扩展完全不需要知道区别。
 
-`goal` 默认只有一份 `.auto/goal.md`。要按工作流拆开就改名成
-`.auto/goal-iter.md` / `.auto/goal-baseline.md`（本地放代码的话用子目录也行，
-见 `templates/AGENTS.research.md` 的工作流表）。
-拆开之后：
+同一个项目里想备好几份 goal 也行：
 
-- `/rl goal -t baseline <文本>` → 写到 `.auto/goal-baseline.md`
-- `/rl doctor` 会认出所有 `goal*.md`，不会因为改名而误报缺失
-- 记得把 AGENTS.md 里那张工作流表改成你实际的文件名——**那是给 agent 的索引**
+- `/rl goal -t <名字> <文本>` → 写到 `.auto/goal-<名字>.md`
+- `/rl doctor` 会认出所有 `goal*.md`，不会因为另起文件名而误报缺失
 
 ---
 

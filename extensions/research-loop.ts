@@ -19,7 +19,7 @@
  *   /rl stop       停止
  *   /rl status     看状态
  *   /rl goal <文本> 往 goal 的「临时建议」加一条，下一轮自动生效
- *                  （-t <工作流> 写到 .auto/goal-<工作流>.md）
+ *                  （-t <名字> 写到 .auto/goal-<名字>.md，多数情况用不到）
  *   /rl agents     项目里已有 AGENTS.md 时，让 agent 帮你合并（去重 + 精简），
  *                  背景提取自你的文档放在块外，规则块逐字保留
  *   /rl models     编辑模型链（键盘排序，存全局配置）。额度耗尽时按链顺序切换；
@@ -326,7 +326,7 @@ function helpText(): string {
 		"  /rl stop         停止循环",
 		"  /rl status       看状态：循环在不在跑 + 实验进展",
 		"  /rl goal <文本>   往 goal 的「临时建议」加一条，下一轮 agent 自动读到",
-		"                   加 -t <工作流> 写到 .auto/goal-<工作流>.md",
+		"                   加 -t <名字> 写到 .auto/goal-<名字>.md",
 		"  /rl agents       项目里已有 AGENTS.md 时，让 agent 帮你合并（去重 + 精简）",
 		"  /rl models       编辑模型链：额度耗尽时按链的顺序自动切换",
 		"  /rl doctor       环境体检（只读）：ssh、目录、脚本、项目文件",
@@ -416,8 +416,8 @@ function handleSshFailure(pi: ExtensionAPI, res: { err: string; out: string }): 
 /**
  * 待检查表里的一行。
  *
- * track / note 是**给 agent 看的标签**，扩展只透传、不解析语义——
- * 它不知道 "iter" 和 "baseline" 是什么，只是把字符串搬进唤醒消息。
+ * track / note 是**给 agent 看的自由标签**，扩展只透传、不解析语义——
+ * 它不知道你写的是什么，只是把字符串搬进唤醒消息。
  */
 interface TableEntry {
 	path: string;
@@ -634,7 +634,7 @@ async function doctor(): Promise<void> {
 	}
 
 	// 项目级文件（跟着 cwd）。
-	// goal 可能按工作流拆成多份（goal-iter.md / goal-baseline.md），找到任一就算有。
+	// goal 可能有多份（goal.md 或 goal-<名字>.md），找到任一就算有。
 	const autoDir = join(process.cwd(), ".auto");
 	const goalFiles = existsSync(autoDir)
 		? readdirSync(autoDir).filter((f) => /^goal[A-Za-z0-9_-]*\.md$/i.test(f))
@@ -839,8 +839,8 @@ function ensureProjectFiles(): string[] {
 }
 
 /**
- * goal 文件的路径。按工作流拆分时是 `.auto/goal-<track>.md`，
- * 不拆就是 `.auto/goal.md`。track 只允许安全字符，避免写成别的路径。
+ * goal 文件的路径：给名字就是 `.auto/goal-<名字>.md`，不给就是 `.auto/goal.md`。
+ * 名字只允许安全字符，避免写成别的路径。
  */
 function goalPath(track: string | undefined): string {
 	const name = track && /^[A-Za-z0-9_-]+$/.test(track) ? `goal-${track}.md` : "goal.md";
@@ -872,7 +872,7 @@ function sectionBody(md: string, heading: string): string {
 		.trim();
 }
 
-/** 默认那份 goal（`goal.md`）填没填。拆成 goal-iter/baseline 的话由你自己维护，这里不查。 */
+/** 默认那份 goal（`goal.md`）填没填。另起的 `goal-<名字>.md` 由你自己维护，这里不查。 */
 function goalStatus(): { exists: boolean; missing: string[] } {
 	const p = join(process.cwd(), ".auto", "goal.md");
 	if (!existsSync(p)) return { exists: false, missing: [] };
@@ -1297,7 +1297,8 @@ export default function (pi: ExtensionAPI) {
 
 			if (a === "goal" || a.startsWith("goal ")) {
 				const rest = a.slice("goal".length).trim();
-				// /rl goal -t <工作流> <文本> —— 写到 .auto/goal-<工作流>.md
+				// /rl goal -t <名字> <文本> —— 写到 .auto/goal-<名字>.md
+				// 多数情况用不到；想在一个项目里备好几份目标（比如换阶段）时才用
 				let track: string | undefined;
 				let text = rest;
 				const m = /^-t\s+([A-Za-z0-9_-]+)\s+([\s\S]*)$/.exec(rest);
@@ -1307,7 +1308,10 @@ export default function (pi: ExtensionAPI) {
 				}
 				if (!text) {
 					notify(
-						["用法：/rl goal <想让 agent 知道的方向或建议>", "或：/rl goal -t <工作流> <文本>"].join("\n"),
+						[
+							"用法：/rl goal <想让 agent 知道的方向或建议>",
+							"或：/rl goal -t <名字> <文本>（写到 .auto/goal-<名字>.md）",
+						].join("\n"),
 						"warning",
 					);
 					return;
@@ -1392,7 +1396,7 @@ export default function (pi: ExtensionAPI) {
 			"起完实验必须调 track_run 登记路径，否则扩展不会盯它，实验会静默失联",
 			"必须保证实验结束时会在该路径下写 DONE 文件（改训练代码，或命令末尾 touch）",
 			"实验处理完把它从 .auto/runs.csv 里删掉",
-			"track / note 强烈建议填：唤醒消息会原样带上，你一眼就知道这是哪个工作流、在试什么",
+			"track / note 建议填：唤醒消息会原样带上，你一眼就知道这是在试什么",
 		],
 		parameters: Type.Object({
 			path: Type.String({ description: "服务器上该实验输出目录的绝对路径" }),
@@ -1405,7 +1409,7 @@ export default function (pi: ExtensionAPI) {
 			track: Type.Optional(
 				Type.String({
 					description:
-						"这条属于哪个工作流，例如 iter / baseline。扩展**不解析**它的含义，只原样带进唤醒消息。",
+						"一个自由标签，用来归类这条实验（比如方法名、数据集、阶段）。扩展**不解析**它的含义，只原样带进唤醒消息。",
 				}),
 			),
 			note: Type.Optional(

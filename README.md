@@ -95,6 +95,68 @@ Write `.auto/goal.md`: method, goal, which metrics, rough direction, concurrency
 
 Then just tell the agent what to work on. It launches the first experiment, and the loop continues from there.
 
+### What goes in goal.md — two examples
+
+**The extension doesn't know what "iteration" or "baseline" means.** Those are
+not features — they are just two different things you might write in `goal.md`.
+Same loop, same table, same commands, same everything.
+
+**Iterating on your own method:**
+
+```markdown
+# 我在做什么
+优化我的 ReID 方法。当前最好 mAP 68.2（exp07）。
+
+## 目标
+mAP 提到 72 以上，CMC 不能掉。
+
+## 看哪些指标
+- mAP：越大越好（主指标）
+- CMC：越大越好
+- 显存：越小越好，超 20G 算失败
+
+## 大致方向
+1. 骨干换 Swin —— 论文显示有收益，先做这个
+2. loss 加 center loss
+一个方向试 2~3 次没效果就换，把「试过、没用」记进 notes。
+
+## 资源约束
+- 并发上限 2（服务器上还有别人，别占满）
+```
+
+**Reproducing baselines to compare against:**
+
+```markdown
+# 我在做什么
+把待对比的方法逐个改造到能跑、出数。领域较新，以往的方法基本都要改造。
+
+## 目标
+至少 3 个可比方法在同一批数据集上跑出数，之后整理成对比表。
+
+## 看哪些指标
+先按各方法原始代码的输出原样记，口径之后统一。
+
+## 大致方向
+1. 先调研有哪些方法可以比（读文献、找开源实现），列出候选
+2. 逐个拉代码、配环境、改接口和数据格式，让它跑起来
+3. 数记全：指标、配置、环境坑、改了哪里。先别急着整理成表
+
+## 资源约束
+- 并发上限 2
+```
+
+(Section names match `templates/goal.md`; `我在做什么` and `大致方向` are the
+two `/rl doctor` insists on — the rest is up to you.)
+
+That's the entire difference. Nothing in the extension changes between the two.
+
+You don't need separate directories either — **one console directory per session
+is enough**: open one for iteration with the first goal, another elsewhere for
+baselines with the second. The extension just watches whatever you register.
+
+(If you do keep several goals in one project, `/rl goal -t <name> <text>` writes
+to `.auto/goal-<name>.md`. Usually unnecessary.)
+
 ### Commands
 
 ```bash
@@ -103,7 +165,7 @@ Then just tell the agent what to work on. It launches the first experiment, and 
 /rl stop          Stop
 /rl status        Status
 /rl goal <text>   Append a note to your goal file, picked up next turn
-                  (-t <track> writes to .auto/goal-<track>.md)
+                  (-t <name> writes to .auto/goal-<name>.md)
 /rl agents        Merge into an existing AGENTS.md (dedupe + condense) — done by the agent
 /rl models        Edit the model chain (keyboard reorder); auto-switches when quota runs out
 /rl doctor        Environment check (read-only)
@@ -238,7 +300,7 @@ The extension **only writes inside your working directory**. `~/.pi/agent/` is r
 ## Roadmap
 
 - [x] **Local mode**: pi installed directly on the server, no ssh (`"sshHost": "local"`)
-- [x] **Baseline support** — needs no separate extension: same loop, same table, distinguished by the `track` column
+- [x] **Baseline support** — needs no separate extension or mode: the extension can't tell baselines from iteration, and doesn't need to. The difference is what you write in `goal.md`
 - [ ] **Translate docs to English**
 - [x] **Model chain with quota-based failover**: `lib/model-chain.ts` + `/rl models`
 - [ ] **Inline templates**: drop the `import.meta.url` dependency for locating `templates/`
