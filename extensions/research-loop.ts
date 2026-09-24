@@ -1012,6 +1012,12 @@ async function editModelChain(_pi: ExtensionAPI, ctx: ExtensionContext): Promise
 			const clamp = () => {
 				cursor = Math.max(0, Math.min(cursor, chain.length - 1));
 			};
+			const move = (delta: number) => {
+				const to = cursor + delta;
+				if (to < 0 || to >= chain.length) return;
+				[chain[cursor], chain[to]] = [chain[to]!, chain[cursor]!];
+				cursor = to;
+			};
 			return {
 				render(): string[] {
 					const lines: string[] = [];
@@ -1028,7 +1034,7 @@ async function editModelChain(_pi: ExtensionAPI, ctx: ExtensionContext): Promise
 						});
 					}
 					lines.push("");
-					lines.push(theme.fg("dim", "↑↓ 选中 · Ctrl+↑/↓ 移动 · a 添加 · r 替换 · d 删除"));
+					lines.push(theme.fg("dim", "↑↓ 选中 · [ ] 移动 · a 添加 · r 替换 · d 删除"));
 					lines.push(theme.fg("dim", "Enter 保存 · Esc 取消"));
 					return lines;
 				},
@@ -1051,18 +1057,23 @@ async function editModelChain(_pi: ExtensionAPI, ctx: ExtensionContext): Promise
 						clamp();
 						return true;
 					}
+					// 移动用纯字符键：Ctrl/Cmd/Alt + 方向键会被 macOS 系统快捷键
+					// （Mission Control、切换 Space）或终端本身截走，根本到不了 TUI。
+					if (data === "[") {
+						move(-1);
+						return true;
+					}
+					if (data === "]") {
+						move(1);
+						return true;
+					}
+					// 能用就用，被系统吃掉也不影响（上面两个已经够用）
 					if (matchesKey(data, "ctrl+up")) {
-						if (cursor > 0) {
-							[chain[cursor - 1], chain[cursor]] = [chain[cursor]!, chain[cursor - 1]!];
-							cursor -= 1;
-						}
+						move(-1);
 						return true;
 					}
 					if (matchesKey(data, "ctrl+down")) {
-						if (cursor < chain.length - 1) {
-							[chain[cursor + 1], chain[cursor]] = [chain[cursor]!, chain[cursor + 1]!];
-							cursor += 1;
-						}
+						move(1);
 						return true;
 					}
 					if (data === "a") {
