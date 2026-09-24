@@ -59,6 +59,18 @@ export function touch(w: RunWatch, path: string): number {
 	return w.firstSeen[path];
 }
 
+/**
+ * 重新计时。
+ *
+ * 超时提醒**不能**用 markHandled——那是永久的，会把之后真正出现的 DONE 也跳过去。
+ * 超时只是「提醒一下，你查查是不是卡了」，实验还在跑呢。
+ * 所以报完重新打点：再过一个 maxHours 才提醒下一次。
+ */
+export function resetSeen(w: RunWatch, path: string): void {
+	w.firstSeen[path] = Date.now();
+	saveState(w);
+}
+
 export function markHandled(w: RunWatch, path: string): void {
 	w.firstSeen[path] = undefined as unknown as number;
 	delete w.firstSeen[path];

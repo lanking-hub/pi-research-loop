@@ -72,12 +72,20 @@ import {
 import { templatesDir } from "../lib/paths.ts";
 import { runRemote } from "../lib/ssh.ts";
 import { runSetup } from "../lib/setup.ts";
-import { forget, loadState, markHandled, touch, type RunWatch } from "../lib/state.ts";
+import { forget, loadState, markHandled, resetSeen, touch, type RunWatch } from "../lib/state.ts";
 
 /** 待唤醒队列里的一项：已经拼好的说明文字 */
 interface PendingItem {
 	key: string;
 	lines: string[];
+	/**
+	 * 是不是终态（完成 / 崩溃）。
+	 *
+	 * 终态 → 报一次就标记已处理，之后不再报。
+	 * 超时**不是**终态——进程还在跑，只是时间长了提醒你查一下。
+	 * 给它打终态的话，之后真正出现的 DONE 会被永久跳过，实验静默失联。
+	 */
+	terminal: boolean;
 }
 
 /** 给远程 shell 用的单引号包裹（路径里可能含空格） */
@@ -387,7 +395,13 @@ async function maybeWake(pi: ExtensionAPI): Promise<void> {
 	// 先发，成功才标记已处理。否则结果会被「已处理」掉却根本没告诉 agent。
 	const sent = await wake(pi, buildWakeMessage(batch));
 	if (sent) {
-		for (const b of batch) markHandled(watch, b.key);
+		for (const b of batch) {
+			// 只有终态（完成 / 崩溃）才永久标记已处理。
+			// 超时不是终态——实验还在跑，标记了就会把之后真正出现的 DONE
+			// 永久跳过，实验静默失联。改成重新计时：再过一个 maxHours 才提醒下一次。
+			if (b.terminal) markHandled(watch, b.key);
+			else resetSeen(watch, b.key);
+		}
 	} else {
 		// 没发出去：原样放回队首，下一轮再试
 		pending.unshift(...batch);
@@ -552,7 +566,11 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 		sshFailCount = 0;
 
 		if (st === "DONE") {
-			enqueue({ key: e.path, lines: [`- 完成：${describe(e)}`, `  读 ${e.path}/DONE 看结果。`] });
+			enqueue({
+			key: e.path,
+			lines: [`- 完成：${describe(e)}`, `  读 ${e.path}/DONE 看结果。`],
+			terminal: true,
+		});
 			continue;
 		}
 
@@ -564,6 +582,7 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 					`  进程 ${e.pid} 已不存在，且没有 DONE。`,
 					`  去读它的日志定位原因，然后把这行从 ${cfg.runsFile} 删掉。`,
 				],
+				terminal: true,
 			});
 			continue;
 		}
@@ -581,6 +600,7 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 						? `  没登记 pid，无法判断进程是否还活着。去查：崩了、卡了，还是忘了写 DONE？`
 						: `  进程还在但没有 DONE。去查：卡住了，还是训练代码忘了写 DONE？`,
 				],
+				terminal: false,
 			});
 			continue;
 		}
