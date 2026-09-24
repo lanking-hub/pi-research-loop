@@ -13,7 +13,9 @@
  * 领域规则全部在 AGENTS.md（见 templates/）里，由人维护。
  *
  * 命令（默认动作 = 开始循环）：
- *   /rl            开始循环（已在跑则显示状态）
+ *   /rl            开始循环。没有实验在跑时会**主动让 agent 开局**——
+ *                  扩展只会被「实验有结果」触发，不这么做的话第一次按 /rl 永远没反应
+ *   /rl <一句话>    开始循环，并把这句话交给 agent 当第一轮任务
  *   /rl stop       停止
  *   /rl status     看状态
  *   /rl goal <文本> 往 goal 的「临时建议」加一条，下一轮自动生效
@@ -111,7 +113,9 @@ function helpText(): string {
 	return [
 		"research-loop —— 自主科研迭代循环",
 		"",
-		"  /rl              开始循环（默认动作；已在跑则显示状态）",
+		"  /rl              开始循环（默认动作）",
+		"                  没有实验在跑时会让 agent 开局，不会干等着",
+		"  /rl <一句话>      开始循环，并把这句话交给 agent 当第一轮任务",
 		"  /rl stop         停止循环",
 		"  /rl status       看状态：循环在不在跑 + 实验进展",
 		"  /rl goal <文本>   往 goal 的「临时建议」加一条，下一轮 agent 自动读到",
@@ -680,37 +684,92 @@ function stopPolling(): void {
 	pollInFlight = false;
 }
 
+/** 已知子命令。不在这个集合里的输入都当成「一句话任务」交给 agent */
+const SUBCOMMANDS = new Set([
+	"start", "on", "stop", "off", "status", "goal",
+	"agents", "doctor", "check", "setup", "help", "-h", "--help", "?",
+]);
+
+/**
+ * 启动第一轮的话术。
+ *
+ * 不能省：刚开循环时登记表是空的，而扩展**只会被「实验有结果」触发**——
+ * 没有实验就永远没人叫醒 agent，用户按了 /rl 只会看到一片安静，
+ * 看起来就像坏了。
+ *
+ * 这里只讲机制（读哪些文件、最后要起实验并登记），
+ * 「调研什么、往哪个方向改」一律交给 goal 和 AGENTS.md——那是人的内容。
+ */
+const BOOTSTRAP_PROMPT = [
+	"循环已启动，但登记表里还没有任何实验，所以这一轮由你开局。",
+	"",
+	"按 AGENTS.md 的「每一轮怎么工作」和 .auto/goal.md 推进。",
+	"",
+	"注意：实验是**验证手段**，核心是把方法和代码往前推。",
+	"这一轮的重点是调研和改代码，起实验是为了验证这次改得对不对。",
+	"起完实验记得用 track_run 登记——不登记就没人等它，也不会有任何报错。",
+].join("\n");
+
+async function startLoop(pi: ExtensionAPI, task: string | undefined): Promise<void> {
+	if (isRunning()) {
+		// 已经在跑：不重复建定时器，但你这句话照样交给 agent
+		if (task) {
+			wake(pi, task);
+			notify("循环已在运行，你这句话已交给 agent。", "info");
+		} else {
+			notify(`循环已在运行，不用重复启动。\n${statusText()}`, "info");
+		}
+		return;
+	}
+
+	if (!isConfigured(cfg)) {
+		notify("配置未完成，先填 sshHost（没配过就跑 /rl setup）", "warning");
+		return;
+	}
+
+	try {
+		await startPolling(pi);
+	} catch (e) {
+		notify(
+			`启动失败：${e instanceof Error ? e.message : String(e)}\n可以直接重试 /rl，或 /rl doctor 查环境`,
+			"error",
+		);
+		return;
+	}
+
+	// 用 wake() 而不是直接 sendUserMessage：它才会记 lastWakeAt。
+	// 这里不能无条件设 lastWakeAt——那样会把「已有实验结果」的首次唤醒
+	// 也一起挡进合并窗口，明明有结果却要等下一轮才报。
+	if (task) {
+		wake(pi, task);
+		notify(`循环已开始 — 你这句话已交给 agent。\n/rl stop 停止`, "info");
+		return;
+	}
+
+	// 没有实验在跑时必须主动开局，否则「等实验」永远等不到东西
+	if (parseTableEntries().length === 0) {
+		wake(pi, BOOTSTRAP_PROMPT);
+		notify(`循环已开始 — 表里没有实验，已让 agent 启动第一轮。\n/rl stop 停止`, "info");
+		return;
+	}
+
+	notify(`循环已开始 — 盯着已登记的实验，有结果就叫醒 agent。\n/rl stop 停止`, "info");
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("rl", {
-		description: "research-loop：开始循环（默认） / stop / status / goal / agents / doctor / setup / help",
+		description: "research-loop：开始循环（默认） / <一句话任务> / stop / status / goal / agents / doctor / setup / help",
 		handler: async (args, ctx) => {
 			lastCtx = ctx;
 			cfg = loadConfig();
 			const a = args.trim();
 
-			// 默认动作 = 开始循环（最常做的那件事）
-			if (!a || a === "start" || a === "on") {
-				if (isRunning()) {
-					notify(`循环已在运行，不用重复启动。\n${statusText()}`, "info");
-					return;
-				}
-				if (!isConfigured(cfg)) {
-					notify("配置未完成，先填 sshHost（没配过就跑 /rl setup）", "warning");
-					return;
-				}
-				try {
-					await startPolling(pi);
-				} catch (e) {
-					notify(
-						`启动失败：${e instanceof Error ? e.message : String(e)}\n可以直接重试 /rl，或 /rl doctor 查环境`,
-						"error",
-					);
-					return;
-				}
-				notify(
-					`循环已开始 — 我会盯着实验，一有结果就叫醒 agent 继续迭代你的方法。\n/rl stop 停止`,
-					"info",
-				);
+			// 默认动作 = 开始循环。不是子命令的输入都当「一句话任务」，
+			// 这样 /rl 帮我先调研有哪些方法可对比 也能直接用。
+			const first = a.split(/\s+/)[0] ?? "";
+			const isStartCmd = !a || a === "start" || a === "on";
+			if (isStartCmd || !SUBCOMMANDS.has(first)) {
+				await startLoop(pi, isStartCmd ? undefined : a);
 				return;
 			}
 
