@@ -100,16 +100,35 @@ interface SimpleModel {
 	name?: string;
 }
 
+/**
+ * 这台机器上能切过去的模型。
+ *
+ * ⚠️ `scopedModels` 的语义容易搞反：它是**本会话的作用域限制**
+ * （由 `--models` / `enabledModels` 决定），
+ * **为空表示没有限制、所有已登录模型都能用**——不是「没有模型」。
+ * 所以为空时要退回 `modelRegistry.getAvailable()`，否则会误报「没有可用模型」。
+ */
 function candidateList(): ChainCandidate<SimpleModel>[] {
-	const scoped = (lastCtx as { scopedModels?: readonly { model?: SimpleModel }[] } | undefined)
-		?.scopedModels;
-	return (scoped ?? [])
-		.filter((s) => Boolean(s?.model?.id))
-		.map((s) => ({
-			provider: String(s!.model!.provider ?? ""),
-			id: String(s!.model!.id ?? ""),
-			name: s!.model!.name ? String(s!.model!.name) : undefined,
-			model: s!.model!,
+	const c = lastCtx as
+		| {
+				scopedModels?: readonly { model?: SimpleModel }[];
+				modelRegistry?: { getAvailable?: () => SimpleModel[] };
+		  }
+		| undefined;
+
+	const scoped = c?.scopedModels ?? [];
+	const raw: SimpleModel[] =
+		scoped.length > 0
+			? scoped.map((s) => s.model!).filter(Boolean)
+			: (c?.modelRegistry?.getAvailable?.() ?? []);
+
+	return raw
+		.filter((m) => Boolean(m?.id))
+		.map((m) => ({
+			provider: String(m.provider ?? ""),
+			id: String(m.id ?? ""),
+			name: m.name ? String(m.name) : undefined,
+			model: m,
 		}));
 }
 
