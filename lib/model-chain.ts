@@ -32,7 +32,7 @@ export type FailoverKind =
 // 顺序有意义：先判 auth（401 也可能带 quota 字样），再判 quota，最后才是限流/网络
 const AUTH_PATTERN = /\b401\b|unauthor|authentication fails|invalid[_-]?api[_-]?key|permission denied|forbidden/i;
 const QUOTA_PATTERN =
-	/usage[_-]?limit|usage_not_included|insufficient_quota|quota exceeded|out of budget|available balance|monthly usage limit|GoUsageLimitError|FreeUsageLimitError|you have hit your .*usage limit|billing|insufficient balance/i;
+	/usage[_-]?limit|usage_not_included|insufficient_quota|quota exceeded|out of budget|available balance|monthly usage limit|GoUsageLimitError|FreeUsageLimitError|you have hit your .*usage limit|billing|insufficient balance|使用上限|额度耗尽|额度不足|余额不足|超出额度|配额用尽|额度已用/i;
 const RATE_PATTERN = /rate[_-]?limit|too many requests|\b429\b|overloaded|high demand|capacity/i;
 const NETWORK_PATTERN = /fetch failed|econnreset|econnrefused|enotfound|socket hang|timed? ?out|network error|dns/i;
 
@@ -88,19 +88,63 @@ export function classifyError(text: string): FailoverKind {
 }
 
 /**
- * 从错误文案里抠出「多久之后恢复」。
+ * 从错误文案里抠出「多久之后恢复」（分钟）。
  *
  * pi 只把 Codex 的 resets_at 转成文案（"Try again in ~192 min."），
  * 结构化时间戳不暴露给扩展；其他 provider 连这句都没有。
  * 抠不到就返回 undefined，调用方用配置的默认值兜底。
+ *
+ * 2026-09-24 实测补充（智谱生产环境真实报错）：
+ *   "rate limit exceeded: 已达到 5 小时的使用上限。您的限额将在
+ *    2026-09-19 15:24:24 重置[...]"
+ * 中文上限文案和绝对重置时间都要认，否则智谱永远吃默认 1 小时冷却、
+ * 每小时盲撞一次链头。
+ *
+ * now 可注入，纯函数好测试；默认真实时钟。
  */
-export function extractCooldownMinutes(text: string): number | undefined {
+export function extractCooldownMinutes(text: string, now: number = Date.now()): number | undefined {
 	if (!text) return undefined;
-	const m = /try again in\s*~?\s*(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m)\b/i.exec(text);
-	if (!m?.[1] || !m[2]) return undefined;
-	const n = Number(m[1]);
-	if (!Number.isFinite(n) || n <= 0) return undefined;
-	return /^h/i.test(m[2]) ? n * 60 : n;
+	// 1) 英文相对时长："Try again in ~192 min." / "~2 hours" / "~1 day"
+	const m = /try again in\s*~?\s*(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|days?|d)\b/i.exec(text);
+	if (m?.[1] && m[2]) {
+		const n = Number(m[1]);
+		if (Number.isFinite(n) && n > 0) {
+			if (/^h/i.test(m[2])) return n * 60;
+			if (/^d/i.test(m[2])) return n * 1440;
+			return n;
+		}
+	}
+	// 2) 中文相对时长："约 30 分钟后重试" / "5 小时后重置"
+	const mcn = /(\d+)\s*(?:个)?\s*(分钟|小时|时)\s*后/.exec(text);
+	if (mcn?.[1]) {
+		const n = Number(mcn[1]);
+		if (Number.isFinite(n) && n > 0) return mcn[2].startsWith("分") ? n : n * 60;
+	}
+	// 3) 绝对时间（要求文案确实在说重置/限额，避免误抓无关数字）：
+	//    "将在 2026-09-19 15:24:24 重置"（完整日期）或 "15:24:24 重置"（当天）
+	if (/重置|恢复|限额|上限|额度/.test(text)) {
+		const full = /(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(text);
+		if (full) {
+			const t = new Date(+full[1], +full[2] - 1, +full[3], +full[4], +full[5], +(full[6] ?? 0)).getTime();
+			return minutesFrom(t, now);
+		}
+		const tod =
+			/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:重置|恢复)/.exec(text) ??
+			/(?:重置|恢复)[^0-9]{0,6}(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(text);
+		if (tod) {
+			const d = new Date(now);
+			let t = new Date(d.getFullYear(), d.getMonth(), d.getDate(), +tod[1], +tod[2], +(tod[3] ?? 0)).getTime();
+			if (t <= now) t += 24 * 3600_000; // 已过点 → 视为明天
+			return minutesFrom(t, now);
+		}
+	}
+	return undefined;
+}
+
+function minutesFrom(target: number, now: number): number | undefined {
+	const diff = target - now;
+	if (diff <= 0) return undefined;
+	return Math.max(1, Math.ceil(diff / 60_000));
 }
 
 /** 模型在链里的标识 */

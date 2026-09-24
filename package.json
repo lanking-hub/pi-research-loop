@@ -6,6 +6,9 @@
     "pi-package"
   ],
   "license": "MIT",
+  "scripts": {
+    "test": "node --test --experimental-strip-types tests/"
+  },
   "dependencies": {
     "ssh2": "^1.16.0"
   },
