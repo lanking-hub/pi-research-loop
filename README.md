@@ -2,7 +2,7 @@
 
 Run an **autonomous research iteration loop** on a remote GPU server, driven by [pi](https://github.com/earendil-works/pi): launch an experiment → wait → wake the agent when results land → analyze → next experiment → repeat.
 
-Built for any research workflow of the shape *change the method/code → run an experiment → look at the result*.
+Built for research automation — but the mechanism is generic: anything shaped *dispatch a long job → wait → act on the result* works, not just experiments. Most of what ships here (templates, docs, defaults) is tuned for research.
 
 > **Windows users**: see [docs/setup-windows.md](docs/setup-windows.md) for a start-to-finish checklist.
 
@@ -32,7 +32,7 @@ The extension knows nothing about your metrics. It does not keep/discard, and do
 
 **When an experiment finishes, write a `DONE` file in its output directory.** Contents are up to you (metrics recommended).
 
-That's it. How you launch is entirely unconstrained — `nohup`, `sbatch`, `docker`, `conda`, multi-node. **Compatibility comes from not caring how you launch.** This is also why baselines and iteration need no separate mechanism: the extension can't tell them apart, and doesn't need to.
+That's it. How you launch is entirely unconstrained — `nohup`, `sbatch`, `docker`, `conda`, multi-node.
 
 Alongside it, register the path so polling knows to look:
 
@@ -97,9 +97,8 @@ Then just tell the agent what to work on. It launches the first experiment, and 
 
 ### What goes in goal.md — two examples
 
-**The extension doesn't know what "iteration" or "baseline" means.** Those are
-not features — they are just two different things you might write in `goal.md`.
-Same loop, same table, same commands, same everything.
+**Iteration and baselines are not two modes.** They're just two different things you
+might write in `goal.md` — same loop, same table, same commands.
 
 **Iterating on your own method:**
 
@@ -300,7 +299,7 @@ The extension **only writes inside your working directory**. `~/.pi/agent/` is r
 ## Roadmap
 
 - [x] **Local mode**: pi installed directly on the server, no ssh (`"sshHost": "local"`)
-- [x] **Baseline support** — needs no separate extension or mode: the extension can't tell baselines from iteration, and doesn't need to. The difference is what you write in `goal.md`
+- [x] **Baseline support** — no separate extension or mode: baselines are just a different `goal.md`, same loop and same table
 - [ ] **Translate docs to English**
 - [x] **Model chain with quota-based failover**: `lib/model-chain.ts` + `/rl models`
 - [ ] **Inline templates**: drop the `import.meta.url` dependency for locating `templates/`
@@ -314,6 +313,9 @@ MIT
 ## 中文速览
 
 在远程 GPU 服务器上跑自主科研迭代循环：起实验 → 等 → 有结果唤醒 agent → 分析 → 改方法/代码 → 起下一个。
+
+为科研自动化而做，但机制是通用的——任何「派一个长任务 → 等 → 按结果继续」的场景都能用，
+不限于跑实验。这里自带的模板、文档和默认值主要还是面向科研。
 
 ```bash
 pi install git:github.com/lanking-hub/pi-research-loop
