@@ -23,7 +23,20 @@ export const SSH_ALIAS = "research-loop-server";
 export interface Config {
 	/** agent 维护的待检查表：一行一个服务器绝对路径 */
 	runsFile: string;
-	/** table 模式：登记后超过这么久还没 DONE 就提醒（兜底，防静默失联） */
+	/**
+	 * 输出目录连续这么久**没有任何文件更新** → 提醒「疑似卡住」。
+	 *
+	 * 这是判断实验还活着不活着的**主要信号**：实验该跑多久根本没法预先知道
+	 * （5 个 epoch 和 200 个 epoch 差几十倍），但「还在产出」是通用的。
+	 * 只在 Slurm/Docker 拿不到 pid、或进程活着却卡死时才真正需要。
+	 */
+	stallMinutes: number;
+	/**
+	 * 登记后超过这么久还没 DONE 就提醒。
+	 *
+	 * **最后的兜底**，管的是 stallMinutes 抓不到的情况：一直在写日志却永远不结束
+	 * （比如死循环疯狂打印）。正常卡死由 stallMinutes 更早发现。
+	 */
 	maxHours: number;
 	/** ~/.ssh/config 里配好的服务器 Host 别名（免密 key） */
 	sshHost: string;
@@ -46,6 +59,7 @@ export interface Config {
 
 export const DEFAULTS: Config = {
 	runsFile: ".auto/runs.csv",
+	stallMinutes: 90,
 	maxHours: 72,
 	sshHost: SSH_ALIAS,
 

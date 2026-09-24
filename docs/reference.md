@@ -56,7 +56,8 @@ research-loop-server
 |---|---|---|
 | `sshHost` | `research-loop-server` | ssh 别名，一般不用改 |
 | `runsFile` | `.auto/runs.csv` | 登记表路径 |
-| `maxHours` | `72` | 超时兜底 |
+| `stallMinutes` | `90` | **主要的健康信号**：输出目录连续这么久没有任何文件更新 → 提醒「疑似卡住」 |
+| `maxHours` | `72` | 最后兜底：登记后超过这么久还没 `DONE`。管的是 `stallMinutes` 抓不到的情况（一直在写日志却永远不结束） |
 | `pollIntervalSec` | `60` | 轮询间隔 |
 | `mergeWindowSec` | `60` | 两次唤醒最小间隔 |
 | `sshTimeoutSec` | `15` | 单次 ssh 超时 |

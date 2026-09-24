@@ -72,20 +72,31 @@ import {
 import { templatesDir } from "../lib/paths.ts";
 import { runRemote } from "../lib/ssh.ts";
 import { runSetup } from "../lib/setup.ts";
-import { forget, loadState, markHandled, resetSeen, touch, type RunWatch } from "../lib/state.ts";
+import {
+	forget,
+	loadState,
+	markHandled,
+	markStallWarn,
+	resetSeen,
+	stallWarnedRecently,
+	touch,
+	type RunWatch,
+} from "../lib/state.ts";
 
 /** 待唤醒队列里的一项：已经拼好的说明文字 */
 interface PendingItem {
 	key: string;
 	lines: string[];
 	/**
-	 * 是不是终态（完成 / 崩溃）。
+	 * 唤醒后怎么处置这条登记——**绝不能一律标「已处理」**。
 	 *
-	 * 终态 → 报一次就标记已处理，之后不再报。
-	 * 超时**不是**终态——进程还在跑，只是时间长了提醒你查一下。
-	 * 给它打终态的话，之后真正出现的 DONE 会被永久跳过，实验静默失联。
+	 *   handled  终态（完成 / 崩溃）：报一次就够，之后不再提
+	 *   reset    超时：实验还在跑，只是时间长了。标记成已处理会把之后
+	 *            真正出现的 DONE 永久跳过 → 实验静默失联。改成重新计时
+	 *   stall    卡住：持续状态，只要还在卡每轮都满足，所以要节流，
+	 *            否则每 60 秒唤醒一次 agent
 	 */
-	terminal: boolean;
+	after: "handled" | "reset" | "stall";
 }
 
 /** 给远程 shell 用的单引号包裹（路径里可能含空格） */
@@ -397,9 +408,12 @@ async function maybeWake(pi: ExtensionAPI): Promise<void> {
 	if (sent) {
 		for (const b of batch) {
 			// 只有终态（完成 / 崩溃）才永久标记已处理。
-			// 超时不是终态——实验还在跑，标记了就会把之后真正出现的 DONE
-			// 永久跳过，实验静默失联。改成重新计时：再过一个 maxHours 才提醒下一次。
-			if (b.terminal) markHandled(watch, b.key);
+			// 超时和卡住都**不是**终态：实验还在跑，标记了就会把之后真正出现的
+			// DONE 永久跳过 → 实验静默失联。
+			//   超时 → 重新计时（再过一个 maxHours 才提醒）
+			//   卡住 → 打节流时间戳（至少隔 stallMinutes 才再提醒）
+			if (b.after === "handled") markHandled(watch, b.key);
+			else if (b.after === "stall") markStallWarn(watch, b.key);
 			else resetSeen(watch, b.key);
 		}
 	} else {
@@ -516,26 +530,47 @@ function parseTableEntries(): TableEntry[] {
 	return parsed.filter((e) => e.path);
 }
 
-type TableState = "DONE" | "RUNNING" | "CRASHED" | "NOPID" | "UNKNOWN";
+type TableState = "DONE" | "RUNNING" | "CRASHED" | "NOPID" | "STALLED" | "UNKNOWN";
 
 /**
- * 一次 ssh 判出三态：
+ * 一次 ssh 判出状态：
  *   DONE     有 DONE 文件（不管进程还在不在收尾）
- *   RUNNING  没 DONE 但进程活着
- *   CRASHED  没 DONE 且进程没了 ← pid 的价值就在这，立刻发现，不用等超时
- *   NOPID    没登记 pid（Slurm/Docker 场景），只能靠 DONE + 超时
+ *   RUNNING  没 DONE，进程活着，且输出目录还在产出
+ *   STALLED  进程活着（或没 pid），但输出目录**已经 stallMinutes 没有任何文件更新**
+ *            ← 这是判断「实验还活着吗」的主要信号
+ *   CRASHED  没 DONE 且进程没了 ← pid 的价值就在这，立刻发现
+ *   NOPID    没登记 pid（Slurm/Docker），但目录还在产出
  *   UNKNOWN  ssh 本身出问题
+ *
+ * 为什么用「目录还在不在产出」而不是「跑了多久」：
+ * 实验该跑多久完全没法预先知道——5 个 epoch 和 200 个 epoch 差几十倍，
+ * 任何固定时长都会对其中一类误报。但「还在产出」对所有实验都成立。
  */
 async function remoteRunState(entry: TableEntry): Promise<TableState> {
 	const done = shellQuote(`${entry.path}/DONE`);
+	const dir = shellQuote(entry.path);
+	const n = Math.max(1, Math.round(cfg.stallMinutes));
 	const hasPid = entry.pid !== undefined && /^\d+$/.test(entry.pid);
+	const alive = hasPid ? "RUNNING" : "NOPID";
+
+	// 目录里有没有 stallMinutes 内更新过的文件
+	const probe =
+		`if find ${dir} -type f -mmin -${n} -print -quit 2>/dev/null | grep -q .; ` +
+		`then echo ${alive}; ` +
+		// 有文件但都不新鲜 → 卡住了
+		`elif find ${dir} -type f -print -quit 2>/dev/null | grep -q .; ` +
+		`then echo STALLED; ` +
+		// 一个文件都没有 → 可能刚起还没写出东西，别误判
+		`else echo ${alive}; fi`;
+
 	const cmd = hasPid
-		? `test -f ${done} && echo DONE || { kill -0 ${entry.pid} 2>/dev/null && echo RUNNING || echo CRASHED; }`
-		: `test -f ${done} && echo DONE || echo NOPID`;
+		? `test -f ${done} && echo DONE || { if kill -0 ${entry.pid} 2>/dev/null; then ${probe}; else echo CRASHED; fi; }`
+		: `test -f ${done} && echo DONE || ${probe}`;
+
 	const res = await runRemote(cfg.sshHost, cmd, cfg.sshTimeoutSec);
 	const out = res.out.trim();
-	if (out === "DONE" || out === "RUNNING" || out === "CRASHED" || out === "NOPID") return out;
-	return "UNKNOWN";
+	const known: TableState[] = ["DONE", "RUNNING", "CRASHED", "NOPID", "STALLED"];
+	return known.find((s) => s === out) ?? "UNKNOWN";
 }
 
 /**
@@ -567,10 +602,29 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 
 		if (st === "DONE") {
 			enqueue({
-			key: e.path,
-			lines: [`- 完成：${describe(e)}`, `  读 ${e.path}/DONE 看结果。`],
-			terminal: true,
-		});
+				key: e.path,
+				lines: [`- 完成：${describe(e)}`, `  读 ${e.path}/DONE 看结果。`],
+				after: "handled",
+			});
+			continue;
+		}
+
+		// 卡住：输出目录不产出了。比 maxHours 更早也更准——
+		// 实验该跑多久没法预知，但「还在产出」对所有实验都成立
+		if (st === "STALLED") {
+			if (!stallWarnedRecently(watch, e.path, cfg.stallMinutes)) {
+				enqueue({
+					key: e.path,
+					lines: [
+						`- 疑似卡住：${describe(e)}`,
+						`  输出目录已 ${cfg.stallMinutes} 分钟没有任何文件更新。`,
+						`  去查：是真卡住了（死锁 / 等数据 / GPU 挂起），还是这个实验本来就这么久不打日志？`,
+						`  如果只是日志间隔长，把配置里的 stallMinutes 调大。`,
+					],
+					after: "stall",
+				});
+			}
+			running += 1;
 			continue;
 		}
 
@@ -582,7 +636,7 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 					`  进程 ${e.pid} 已不存在，且没有 DONE。`,
 					`  去读它的日志定位原因，然后把这行从 ${cfg.runsFile} 删掉。`,
 				],
-				terminal: true,
+				after: "handled",
 			});
 			continue;
 		}
@@ -600,7 +654,7 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 						? `  没登记 pid，无法判断进程是否还活着。去查：崩了、卡了，还是忘了写 DONE？`
 						: `  进程还在但没有 DONE。去查：卡住了，还是训练代码忘了写 DONE？`,
 				],
-				terminal: false,
+				after: "reset",
 			});
 			continue;
 		}

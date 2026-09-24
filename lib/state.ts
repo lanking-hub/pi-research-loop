@@ -18,6 +18,8 @@ export interface RunWatch {
 	firstSeen: Record<string, number>;
 	/** 已经报过一轮的路径 */
 	handled: string[];
+	/** 路径 → 上次报「疑似卡住」的时间，用来节流（避免每轮都提醒一次） */
+	stallWarn: Record<string, number>;
 }
 
 const STATE_FILE = ".pi/runs-state.json";
@@ -29,14 +31,15 @@ function statePath(): string {
 export function loadState(): RunWatch {
 	try {
 		const p = statePath();
-		if (!existsSync(p)) return { firstSeen: {}, handled: [] };
+		if (!existsSync(p)) return { firstSeen: {}, handled: [], stallWarn: {} };
 		const raw = JSON.parse(readFileSync(p, "utf8")) as Partial<RunWatch>;
 		return {
 			firstSeen: raw.firstSeen ?? {},
 			handled: Array.isArray(raw.handled) ? raw.handled : [],
+			stallWarn: raw.stallWarn ?? {},
 		};
 	} catch {
-		return { firstSeen: {}, handled: [] };
+		return { firstSeen: {}, handled: [], stallWarn: {} };
 	}
 }
 
@@ -71,6 +74,25 @@ export function resetSeen(w: RunWatch, path: string): void {
 	saveState(w);
 }
 
+/**
+ * 记下「这次报过卡住了」。
+ *
+ * 卡住和完成不一样：它是**持续状态**，只要还在卡就会每轮都满足。
+ * 不节流的话每 60 秒唤醒一次 agent，烧钱且没法干活。
+ * 所以报完打个时间戳，至少隔 stallMinutes 才再报。
+ */
+export function markStallWarn(w: RunWatch, path: string): void {
+	w.stallWarn[path] = Date.now();
+	saveState(w);
+}
+
+/** 距上次报卡住是否还不到 stallMinutes（是就该闭嘴） */
+export function stallWarnedRecently(w: RunWatch, path: string, minutes: number): boolean {
+	const last = w.stallWarn[path];
+	if (last === undefined) return false;
+	return Date.now() - last < minutes * 60000;
+}
+
 export function markHandled(w: RunWatch, path: string): void {
 	w.firstSeen[path] = undefined as unknown as number;
 	delete w.firstSeen[path];
@@ -91,5 +113,11 @@ export function forget(w: RunWatch, livePaths: string[]): void {
 	const before = w.handled.length;
 	w.handled = w.handled.filter((p) => live.has(p));
 	if (w.handled.length !== before) changed = true;
+	for (const p of Object.keys(w.stallWarn)) {
+		if (!live.has(p)) {
+			delete w.stallWarn[p];
+			changed = true;
+		}
+	}
 	if (changed) saveState(w);
 }

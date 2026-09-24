@@ -38,7 +38,8 @@ Alongside it, register the path so polling knows to look:
 
 - `track_run` tool — register an experiment path + PID in one call
 - **The PID is optional but strongly recommended**: with it, a crash is detected **immediately** (`kill -0`, one ssh); without it you wait for the timeout
-- Timeout fallback — if a registered run still has no `DONE` after `maxHours` (default 72h), you get reminded, so a forgotten `DONE` can't become permanent silence
+- **Stall detection** — if the output directory stops producing (no file updated for `stallMinutes`, default 90), you get told it looks stuck. This is the *main* liveness signal: how long an experiment *should* take is unknowable upfront (5 epochs vs 200 differ by orders of magnitude), but "still producing" holds for all of them
+- Timeout fallback — `maxHours` (default 72h) since registration, as a last resort for what stall detection can't catch: a run that keeps writing forever and never finishes
 
 ## Install
 
