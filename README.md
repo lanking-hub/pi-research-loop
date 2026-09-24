@@ -98,7 +98,8 @@ Then just tell the agent what to work on. It launches the first experiment, and 
 ### Commands
 
 ```bash
-/rl               Start the loop (default action; shows status if already running)
+/rl               Start the loop. With nothing registered, it tells the agent to start round one
+/rl <one-liner>   Start the loop and hand that sentence to the agent as its first task
 /rl stop          Stop
 /rl status        Status
 /rl goal <text>   Append a note to your goal file, picked up next turn
