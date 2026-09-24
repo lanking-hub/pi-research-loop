@@ -51,6 +51,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import {
 	CONFIG_NAME,
+	invalidConfigKeys,
 	isConfigured,
 	loadConfig,
 	PLACEHOLDER,
@@ -677,6 +678,14 @@ async function doctor(): Promise<void> {
 	cfg = loadConfig();
 	const lines: string[] = [];
 	let problems = 0;
+
+	// 填了但填错的字段：loadConfig 会静默忽略改用默认值，这里明确说出来
+	const badKeys = invalidConfigKeys();
+	if (badKeys.length > 0) {
+		problems += 1;
+		lines.push(`✗ 配置里这些字段不是有效数字，已忽略、改用默认值：${badKeys.join(", ")}`);
+		lines.push("  填成数字，否则对应行为不是你以为的（比如 stallMinutes 失效 = 卡住检测不工作）");
+	}
 
 	const missing: string[] = [];
 	if (cfg.sshHost === PLACEHOLDER) missing.push("sshHost");

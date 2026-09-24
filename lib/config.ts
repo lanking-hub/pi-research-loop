@@ -79,6 +79,19 @@ export function configPaths(): string[] {
 	return [join(homedir(), ".pi", "agent", CONFIG_NAME), join(process.cwd(), ".pi", CONFIG_NAME)];
 }
 
+/**
+ * 把一个配置值转成数字，转不出来返回 NaN。
+ *
+ * 只认 number 和非空 string。**必须显式排除 null 和 ""**：
+ * `Number(null)` 和 `Number("")` 都是 0，真当成 0 用就糟了——
+ * stallMinutes=0 会被 Math.max(1, 0) 兜成 1 分钟，等于每分钟报一次卡住。
+ */
+function toNumber(v: unknown): number {
+	if (typeof v === "number") return v;
+	if (typeof v === "string" && v.trim() !== "") return Number(v);
+	return NaN;
+}
+
 export function loadConfig(): Config {
 	let merged: Config = { ...DEFAULTS };
 	for (const p of configPaths()) {
@@ -89,7 +102,17 @@ export function loadConfig(): Config {
 			for (const [k, v] of Object.entries(raw)) {
 				// 占位值不覆盖上一层已经填好的值，这样「部分填写的项目级配置」是安全的
 				if (v === PLACEHOLDER) continue;
-				if (k in merged) clean[k] = v;
+				if (!(k in merged)) continue;
+				// 数字字段填成非数字（"abc"、null、""）就忽略，用默认值。
+				// 不拦的话这个值会原样拼进 shell：find ... -mmin -NaN → 报错被
+				// 2>/dev/null 吃掉 → 永远判「活着」，功能静默失效且没有任何提示。
+				if (typeof (DEFAULTS as Record<string, unknown>)[k] === "number") {
+					const n = toNumber(v);
+					if (!Number.isFinite(n)) continue;
+					clean[k] = n;
+					continue;
+				}
+				clean[k] = v;
 			}
 			merged = { ...merged, ...clean };
 		} catch {
@@ -97,6 +120,30 @@ export function loadConfig(): Config {
 		}
 	}
 	return merged;
+}
+
+/**
+ * 配置文件里**填了但填错**的数字字段（"abc"、null、""）。
+ *
+ * loadConfig 会静默忽略它们改用默认值——那是必要的兜底，但用户看不出来。
+ * 这个函数给 doctor 一个能明确说出来的清单。
+ */
+export function invalidConfigKeys(): string[] {
+	const bad = new Set<string>();
+	for (const p of configPaths()) {
+		try {
+			if (!existsSync(p)) continue;
+			const raw = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
+			for (const [k, v] of Object.entries(raw)) {
+				if (v === PLACEHOLDER) continue;
+				if (typeof (DEFAULTS as Record<string, unknown>)[k] !== "number") continue;
+				if (!Number.isFinite(toNumber(v))) bad.add(k);
+			}
+		} catch {
+			// 解析失败由 loadConfig 兜底，这里不重复报
+		}
+	}
+	return [...bad];
 }
 
 export function isConfigured(c: Config): boolean {
