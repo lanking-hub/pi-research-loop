@@ -99,19 +99,28 @@ Slurm / Docker 下不成立，而登记表的做法本来就覆盖了它的全�
 判断用**一条 ssh**：
 
 ```bash
-test -f '<路径>/DONE' && echo DONE || { kill -0 <pid> 2>/dev/null && echo RUNNING || echo CRASHED; }
+test -f '<路径>/DONE' && echo DONE || {
+  if kill -0 <pid> 2>/dev/null; then
+    if   find '<路径>' -type f -mmin -90 -print -quit 2>/dev/null | grep -q .; then echo RUNNING;
+    elif find '<路径>' -type f -print -quit 2>/dev/null        | grep -q .; then echo STALLED;
+    else echo RUNNING; fi
+  else echo CRASHED; fi
+}
 ```
+
+（`find` 那段是卡住检测，见「① 卡住检测」；`-mmin` 是 GNU find 的扩展，
+万一服务器上没有，两个分支都空 → 落到 `else` → 判「活着」，不会误报。）
 
 | 输出 | 含义 |
 |---|---|
 | `DONE` | 有 DONE 文件（不管进程是否还在收尾） |
-| `RUNNING` | 没 DONE 但进程活着 |
+| `RUNNING` | 没 DONE，进程活着，**且输出目录还在产出** |
+| `STALLED` | 进程活着但目录 `stallMinutes` 没有任何文件更新 ← 卡住 |
 | `CRASHED` | 没 DONE 且进程没了 ← pid 的价值：立刻发现，不等超时 |
-| `NOPID` | 没登记 pid，只能靠 DONE + 超时 |
+| `NOPID` | 没登记 pid，但目录还在产出 |
 
-pid **可选**：Slurm / Docker 拿不到进程号就留空，退化为 `NOPID` + 超时兜底。
-
-实测过三态：在跑→`RUNNING`，被 kill→`CRASHED`，touch DONE→`DONE`。
+pid **可选**：Slurm / Docker 拿不到进程号就留空，退化为 `NOPID`——
+此时崩溃只能靠目录不产出（`STALLED`）或 `maxHours` 兜底发现。
 
 ---
 
@@ -119,13 +128,30 @@ pid **可选**：Slurm / Docker 拿不到进程号就留空，退化为 `NOPID` 
 
 完全依赖 agent 配合，漏一步实验就**永远不会被等，且没有任何报错**。这是它最大的风险，用这些兜底：
 
-### ① 超时兜底
+### ① 卡住检测（主力信号）
+
+输出目录连续 `stallMinutes`（默认 90 分钟）**没有任何文件更新** → 唤醒提醒「疑似卡住」。
+
+判断依据是「还在不在产出」而不是「跑了多久」——实验该跑多久根本没法预先知道
+（5 个 epoch 和 200 个 epoch 差几十倍），任何固定时长都会对其中一类误报。
+
+一次 ssh 里顺带判出来（不增加连接数），三个分支避免误报：
+
+- 有 `stallMinutes` 内更新过的文件 → 活着
+- 有文件但都不新鲜 → 卡住
+- 一个文件都没有 → 活着（可能刚起、还没写出东西）
+
+### ② 超时兜底
 
 登记超过 `maxHours`（默认 72 小时）还没 DONE → 唤醒提醒。
+管的是卡住检测抓不到的情况：一直在写日志却永远不结束。
 
-- 首次观察时间**落盘**（`.pi/runs-state.json`），否则 pi 一重启计时归零，长实验永远等不到超时
-- **只提醒一次**，之后标记为已处理不再重复（避免每分钟骚扰）
-- 超时后不再监控——已告诉你了，不能一直吵
+- 首次观察时间**落盘**（`.pi/runs-state.json`），否则 pi 一重启计时归零
+- **不是终态**：提醒完重新计时，再过一个 `maxHours` 才提醒下一次
+- 卡住那条同理，打节流时间戳，至少隔 `stallMinutes` 才再提醒
+
+> ⚠️ 这两条**都不能**标记成「已处理」。标记了就会把之后真正出现的 DONE
+> 永久跳过 → 实验静默失联。这正是本项目最忌讳的失败模式，曾经踩过。
 
 ### ② `track_run` 工具
 
@@ -206,7 +232,11 @@ pi 内部已有重试逻辑。等到 `agent_end` 还带着 quota 类错误，说
 
 `resets_at` **只有 Codex 那条路有**，而且被转成了文案
 （`"You have hit your ChatGPT usage limit (pro plan). Try again in ~192 min."`），
-结构化时间戳并不暴露给扩展。所以：能从文案正则抠出分钟数就用，抠不到用 `cooldownHours`（默认 5）。
+结构化时间戳并不暴露给扩展，而且各家措辞五花八门（实测 14 条真实文案只认出 3 条）。
+
+所以改成**不去猜恢复时间**：冷却默认 `cooldownHours`（**1 小时**），
+用低频重试代替精确计算——一次失败调用的代价很低（额度错误不消耗 token）。
+只有当文案明确给出**比 1 小时更长**的恢复时间时才按它的来，免得白跑一趟。
 
 切换和回切都收敛到 `pickAvailable()`——从链头找第一个不在冷却里的模型。
 **不需要单独的回切逻辑，也不需要后台定时器**：轮询是零 token 的，模型只在「要唤醒」那一刻才重要。

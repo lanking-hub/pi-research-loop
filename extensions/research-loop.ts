@@ -164,7 +164,9 @@ function currentModelKey(): string {
  * 这一个动作同时实现了故障切换和**冷却后回切**——不需要单独的回切逻辑，
  * 也不需要后台定时器：轮询是零 token 的，模型只在要唤醒那一刻才重要。
  *
- * @returns false 表示链上所有模型都不可用（调用方据此停止并通知）
+ * @returns false 表示链上挑不出能用的（都在冷却，或 setModel 都失败）。
+ *          调用方**不要**据此停止循环：轮询是零 token 的，
+ *          停了就没有下一次唤醒，冷却结束也回不来。
  */
 async function ensureBestModel(pi: ExtensionAPI): Promise<boolean> {
 	if (cfg.modelChain.length === 0) return true;
@@ -394,7 +396,7 @@ function buildWakeMessage(batch: PendingItem[]): string {
 	const lines: string[] = ["上一轮的实验有结果了，继续推进。", ""];
 	for (const item of batch) lines.push(...item.lines);
 	lines.push("");
-	lines.push("按 AGENTS.md 的「每一轮怎么工作」继续。");
+	lines.push("按 AGENTS.md 的「一轮的流程」继续。");
 	return lines.join("\n");
 }
 
@@ -1083,7 +1085,7 @@ const SUBCOMMANDS = new Set([
 const BOOTSTRAP_PROMPT = [
 	"循环已启动，但登记表里还没有任何实验，所以这一轮由你开局。",
 	"",
-	"按 AGENTS.md 的「每一轮怎么工作」和 .auto/goal.md 推进。",
+	"按 AGENTS.md 的「一轮的流程」和 .auto/goal.md 推进。",
 	"",
 	"注意：实验是**验证手段**，核心是把方法和代码往前推。",
 	"这一轮的重点是调研和改代码，起实验是为了验证这次改得对不对。",
@@ -1287,8 +1289,15 @@ async function startLoop(pi: ExtensionAPI, task: string | undefined): Promise<vo
 	if (isRunning()) {
 		// 已经在跑：不重复建定时器，但你这句话照样交给 agent
 		if (task) {
-			wake(pi, task);
-			notify("循环已在运行，你这句话已交给 agent。", "info");
+			// 必须看返回值：全链冷却时 wake 会失败，
+			// 不检查的话照样说「已交给 agent」，实际根本没发出去
+			const sent = await wake(pi, task);
+			notify(
+				sent
+					? "循环已在运行，你这句话已交给 agent。"
+					: "循环在运行，但你这句话**没发出去**（见上面的提示）。",
+				sent ? "info" : "warning",
+			);
 		} else {
 			notify(`循环已在运行，不用重复启动。\n${statusText()}`, "info");
 		}
@@ -1502,7 +1511,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"起完实验必须调 track_run 登记路径，否则扩展不会盯它，实验会静默失联",
 			"必须保证实验结束时会在该路径下写 DONE 文件（改训练代码，或命令末尾 touch）",
-			"实验处理完把它从 .auto/runs.csv 里删掉",
+			`实验处理完把它从 ${cfg.runsFile} 里删掉`,
 			"track / note 建议填：唤醒消息会原样带上，你一眼就知道这是在试什么",
 		],
 		parameters: Type.Object({
@@ -1580,7 +1589,7 @@ export default function (pi: ExtensionAPI) {
 						type: "text",
 						text: rawPid
 							? `已登记：${p}（pid ${rawPid}）\n轮询会盯 ${p}/DONE，同时盯进程是否还活着——崩了会立刻通知你。`
-							: `已登记：${p}（无 pid）\n轮询只盯 ${p}/DONE。崩了要等到 ${cfg.maxHours} 小时超时才会提醒，建议以后能填 pid 就填。`,
+							: `已登记：${p}（无 pid）\n轮询会盯 ${p}/DONE，以及输出目录是否还在产出。崩了或卡住大约 ${cfg.stallMinutes} 分钟后才提醒，填 pid 的话能立刻发现。`,
 					},
 				],
 				details: { ok: true },

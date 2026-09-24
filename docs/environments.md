@@ -64,7 +64,7 @@ Two rules:
    python train.py
    echo "exit_code=$?" > /your/output/exp12/DONE
    ```
-2. **Leave the PID empty.** A Slurm job id is not a PID, and the job runs on a compute node — `kill -0` from the login node is meaningless. Without a PID you rely on `DONE` + the timeout fallback, so consider setting `maxHours` close to your real job duration.
+2. **Leave the PID empty.** A Slurm job id is not a PID, and the job runs on a compute node — `kill -0` from the login node is meaningless. Without a PID you rely on `DONE` + stall detection (the output directory going quiet), so set `stallMinutes` to comfortably more than your longest log interval.
 
 Optional: register the job id anyway in `runs.csv` as a comment so you can find it later.
 
@@ -116,13 +116,15 @@ Symptom: no errors, no wake-ups, nothing moves.
 
 **On Windows, never use `wsl ssh`.** WSL is a separate environment with its own keys and known_hosts; it will hang on host-key confirmation. Always use native `ssh.exe` with the configured alias.
 
-### Timeout fired but the experiment was fine
+### "Looks stuck" fired but the experiment was fine
 
-`maxHours` defaults to 72. If your epochs take longer than that to produce output, raise it:
+Stall detection is `stallMinutes` (default 90) of the output directory producing nothing. If your epochs take longer than that between writes, raise it:
 
 ```json
-{ "maxHours": 168 }
+{ "stallMinutes": 240 }
 ```
+
+(`maxHours`, default 72, is now only the last-resort fallback for a run that keeps writing forever and never finishes — you rarely need to touch it.)
 
 ### Timeout fired and the experiment really did die
 
