@@ -15,6 +15,7 @@
 | `/rl goal <文本>` | 往 goal 的「临时建议」加一条，下一轮 agent 自动读到 |
 | `/rl goal -t <工作流> <文本>` | 写到 `.auto/goal-<工作流>.md`（按工作流拆 goal 时用） |
 | `/rl agents` | 已有 AGENTS.md 时让 agent 合并（去重 + 精简），背景放块外、规则逐字保留 |
+| `/rl models` | 编辑模型链（键盘排序，存全局配置）。额度耗尽时按链顺序自动切换 |
 | `/rl doctor` | 环境体检（只读） |
 | `/rl setup` | 首次一站式：生成项目文件 + 配 ssh（需要 TUI 模式） |
 | `/rl help` | 显示所有命令的说明（`-h` / `--help` / `?` 同样有效） |
@@ -60,6 +61,8 @@ research-loop-server
 | `mergeWindowSec` | `60` | 两次唤醒最小间隔 |
 | `sshTimeoutSec` | `15` | 单次 ssh 超时 |
 | `sshFailEscalate` | `3` | ssh 连续失败几次才叫醒 LLM |
+| `modelChain` | `[]` | 模型链，见下。**建议放全局配置**（模型可用性取决于这台机器登录了什么） |
+| `cooldownHours` | `5` | 错误文案里抠不出「多久恢复」时的默认冷却小时数 |
 
 ---
 
@@ -107,6 +110,44 @@ path,pid,track,note
 - `/rl goal -t baseline <文本>` → 写到 `.auto/goal-baseline.md`
 - `/rl doctor` 会认出所有 `goal*.md`，不会因为改名而误报缺失
 - 记得把 AGENTS.md 里那张工作流表改成你实际的文件名——**那是给 agent 的索引**
+
+---
+
+## 模型链 `modelChain`
+
+额度耗尽时按链的顺序自动切到下一个模型。用 `/rl models` 编辑（存全局配置）。
+
+```json
+{
+  "modelChain": ["openai/gpt-5.2", "deepseek/deepseek-v4-pro"]
+}
+```
+
+### 什么时候换
+
+| 类别 | 换吗 |
+|---|---|
+| 额度/账单耗尽（`usage limit`、`quota`、`billing`） | **换** + 该模型进冷却 |
+| 限流/过载（`rate limit`、`429`、`overloaded`） | 不换（pi 自己会重试） |
+| 鉴权失败（`401`、`invalid api key`） | 不换，报错让你修 |
+| 网络（`fetch failed`、超时） | 不换，重试 |
+
+**换完会重发上一轮的提示**，并附一段中断说明，要求 agent 先核对状态、不要重复已完成的部分。
+
+### 冷却
+
+能从错误文案里抠出 `Try again in ~192 min` 就用它（只有 ChatGPT 那条路有这句话），
+抠不到用 `cooldownHours`（默认 5 小时）。
+
+切换和**冷却后回切**是同一个动作：每次要唤醒 agent 前，从链头找第一个不在冷却里的模型。
+不需要后台定时器——轮询是零 token 的，模型只在要唤醒那一刻才重要。
+
+### 提示
+
+- 链里**只列这台机器已登录 provider 的模型**——`/rl models` 的候选本来就是这么来的，
+  避免出现「配了但 `setModel` 静默失败」
+- `setModel` 失败（provider 未登录）会给它标冷却并在通知里说清楚
+- 全链都耗尽：停止循环并明确通知，不会静默
 
 ---
 

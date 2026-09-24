@@ -105,6 +105,7 @@ Then just tell the agent what to work on. It launches the first experiment, and 
 /rl goal <text>   Append a note to your goal file, picked up next turn
                   (-t <track> writes to .auto/goal-<track>.md)
 /rl agents        Merge into an existing AGENTS.md (dedupe + condense) — done by the agent
+/rl models        Edit the model chain (keyboard reorder); auto-switches when quota runs out
 /rl doctor        Environment check (read-only)
 /rl setup         First-time: generate project files + configure ssh (needs TUI mode)
 /rl help          Show this list
@@ -239,7 +240,7 @@ The extension **only writes inside your working directory**. `~/.pi/agent/` is r
 - [x] **Local mode**: pi installed directly on the server, no ssh (`"sshHost": "local"`)
 - [x] **Baseline support** — needs no separate extension: same loop, same table, distinguished by the `track` column
 - [ ] **Translate docs to English**
-- [ ] **Model chain with quota-based failover**: `lib/model-chain.ts`
+- [x] **Model chain with quota-based failover**: `lib/model-chain.ts` + `/rl models`
 - [ ] **Inline templates**: drop the `import.meta.url` dependency for locating `templates/`
 
 ## License

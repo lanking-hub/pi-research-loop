@@ -179,25 +179,46 @@ pi 在同一个目录里只加载**一份**上下文文件（`AGENTS.override.md
 
 ---
 
-## 9. 模型切换（未实现，设计已定）
+## 9. 模型切换（已实现）
 
-**做成共享库 `lib/model-chain.ts`，不做成独立扩展。**
+**共享库 `lib/model-chain.ts`，不做成独立扩展。**
 
-理由：库没有自己的生命周期，只在被调用时做事。做成独立扩展会自己监听 `agent_end`，和任务扩展重复监听 → 一轮换两次模型。
+理由：库没有自己的生命周期，只在被调用时做事。独立扩展会自己监听 `agent_end`，容易和主扩展重复处理。
 
-**只用于长任务循环，不做全局自动切换。**
+### 判据是四类，不是三类
 
-### 判断该不该换模型
+早期设计把 `rate limit` 和 `usage limit` 归成一类、都换模型——**那是错的**。
+pi 自己就把错误分成「不可重试（额度/账单）」和「可重试（限流/过载）」两类
+（`packages/ai/src/utils/retry.ts`）。限流是每分钟请求数超限，等一会儿就好，换模型纯属浪费额度。
 
-| 错误类型 | 特征 | 该做什么 |
+| 类别 | 关键词 | 处理 |
 |---|---|---|
-| key 无效 / 鉴权失败 | `401`、`Authentication Fails`、`invalid api key` | **不换模型**，得修配置 |
-| 网络问题 | `fetch failed`、`connection`、`timeout` | **重试，不换** |
-| 真限额 | `usage limit`、`rate limit`、`quota`、`Try again in ~XX min` | **换模型** |
+| 额度/账单耗尽 | `usage limit`、`insufficient_quota`、`quota exceeded`、`billing`、`available balance` | **换模型 + 冷却** |
+| 限流/过载 | `rate limit`、`429`、`overloaded`、`high demand` | **不换**，pi 自己会重试 |
+| 鉴权失败 | `401`、`invalid api key`、`Authentication Fails` | **不换**，报错让人修配置 |
+| 网络 | `fetch failed`、`ECONNRESET`、`timeout` | **不换**，重试 |
 
-响应里有 `resets_at`（额度恢复时间戳）——**冷却系统应读这个，不要硬编码 5 小时**。
+### 只在 pi 放弃之后才介入
 
-⚠️ 换机器时 `auth.json` 不同步，排序链里的模型必须都已登录，否则 `setModel` 返回 false，切换链静默失败。
+pi 内部已有重试逻辑。等到 `agent_end` 还带着 quota 类错误，说明它已经放弃了，才轮到我们换模型。
+
+### 冷却与回切是同一个动作
+
+`resets_at` **只有 Codex 那条路有**，而且被转成了文案
+（`"You have hit your ChatGPT usage limit (pro plan). Try again in ~192 min."`），
+结构化时间戳并不暴露给扩展。所以：能从文案正则抠出分钟数就用，抠不到用 `cooldownHours`（默认 5）。
+
+切换和回切都收敛到 `pickAvailable()`——从链头找第一个不在冷却里的模型。
+**不需要单独的回切逻辑，也不需要后台定时器**：轮询是零 token 的，模型只在「要唤醒」那一刻才重要。
+
+### 换完重发，但要求先核对状态
+
+重发的是「上一条提示 + 一段中断说明」，明确要求它先看 `notes.md` / `runs.csv` / 文件系统，
+判断上次做到哪，**不要重复已完成的部分**（尤其别重复起实验）。
+否则它可能再改一次代码、再起一个实验——那就是净损失。
+
+⚠️ `setModel` 返回 false = 该 provider 未登录（换机器时 `auth.json` 不同步最常见）。
+这时给它标冷却，避免同一轮里反复试。`/rl models` 只列已登录的模型，从源头规避。
 
 ---
 

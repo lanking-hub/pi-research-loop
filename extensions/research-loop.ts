@@ -22,6 +22,8 @@
  *                  （-t <工作流> 写到 .auto/goal-<工作流>.md）
  *   /rl agents     项目里已有 AGENTS.md 时，让 agent 帮你合并（去重 + 精简），
  *                  背景提取自你的文档放在块外，规则块逐字保留
+ *   /rl models     编辑模型链（键盘排序，存全局配置）。额度耗尽时按链顺序切换；
+ *                  限流/过载/网络不换（pi 自己会重试），鉴权失败不换（得修配置）
  *   /rl doctor     逐项实测环境，告诉你还差什么（只读体检）
  *   /rl help       显示所有命令的说明
  *   /rl setup      首次一站式：生成项目文件（AGENTS.md / goal / notes / runs.csv）
@@ -43,10 +45,29 @@
  */
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { isConfigured, loadConfig, PLACEHOLDER, SSH_ALIAS, type Config } from "../lib/config.ts";
+import {
+	CONFIG_NAME,
+	isConfigured,
+	loadConfig,
+	PLACEHOLDER,
+	SSH_ALIAS,
+	type Config,
+} from "../lib/config.ts";
+import {
+	classifyError,
+	emptyState,
+	extractCooldownMinutes,
+	keyOf,
+	markCooldown,
+	missingEntries,
+	pickAvailable,
+	type ChainCandidate,
+	type ChainState,
+} from "../lib/model-chain.ts";
 import { templatesDir } from "../lib/paths.ts";
 import { runRemote } from "../lib/ssh.ts";
 import { runSetup } from "../lib/setup.ts";
@@ -61,6 +82,156 @@ interface PendingItem {
 /** 给远程 shell 用的单引号包裹（路径里可能含空格） */
 function shellQuote(s: string): string {
 	return `'${s.replace(/'/g, `'\''`)}'`;
+}
+
+// ── 模型链 ────────────────────────────────────────────
+/** 各模型的冷却到期时间（内存即可：进程一停本来也就不轮询了） */
+let chainState: ChainState = emptyState();
+/** 最近一次发给 agent 的文本——换模型后要带着它重发 */
+let lastPrompt: string | undefined;
+/** 连续换模型重试的次数，防止整条链反复绕 */
+let failoverTried = 0;
+
+/** 模型的最小结构。不直接依赖 pi 的 Model 类型，免得类型对不齐。 */
+interface SimpleModel {
+	provider?: string;
+	id?: string;
+	name?: string;
+}
+
+function candidateList(): ChainCandidate<SimpleModel>[] {
+	const scoped = (lastCtx as { scopedModels?: readonly { model?: SimpleModel }[] } | undefined)
+		?.scopedModels;
+	return (scoped ?? [])
+		.filter((s) => Boolean(s?.model?.id))
+		.map((s) => ({
+			provider: String(s!.model!.provider ?? ""),
+			id: String(s!.model!.id ?? ""),
+			name: s!.model!.name ? String(s!.model!.name) : undefined,
+			model: s!.model!,
+		}));
+}
+
+function currentModelKey(): string {
+	const m = (lastCtx as { model?: SimpleModel } | undefined)?.model;
+	if (!m?.id) return "";
+	return keyOf({ provider: String(m.provider ?? ""), id: String(m.id) });
+}
+
+/**
+ * 把模型调到「链里第一个不在冷却中的」。
+ *
+ * 这一个动作同时实现了故障切换和**冷却后回切**——不需要单独的回切逻辑，
+ * 也不需要后台定时器：轮询是零 token 的，模型只在要唤醒那一刻才重要。
+ *
+ * @returns false 表示链上所有模型都不可用（调用方据此停止并通知）
+ */
+async function ensureBestModel(pi: ExtensionAPI): Promise<boolean> {
+	if (cfg.modelChain.length === 0) return true;
+	const list = candidateList();
+	if (list.length === 0) return true;
+
+	const best = pickAvailable(cfg.modelChain, list, chainState, Date.now());
+	if (!best) return false;
+
+	const curKey = currentModelKey();
+	const bestKey = keyOf(best);
+	if (curKey && curKey === bestKey) return true;
+
+	const ok = await pi.setModel(best.model as never);
+	if (ok) {
+		notify(`模型已切到 ${bestKey}`, curKey ? "warning" : "info");
+		return true;
+	}
+	// setModel 返回 false = 这个 provider 没登录（换机器时 auth.json 不同步最常见）。
+	// 标上冷却，避免同一轮里反复试它。
+	markCooldown(chainState, bestKey, Date.now() + cfg.cooldownHours * 3600_000);
+	notify(
+		`切到 ${bestKey} 失败（多半是这个 provider 没登录），已跳过。\n用 /rl models 看这台机器实际可用的模型`,
+		"warning",
+	);
+	return false;
+}
+
+/** 换模型后重发的话术：带上原文，但要求它先核对状态别重复干活 */
+function resumePrompt(err: string): string {
+	return [
+		"你上一轮因为模型额度中断了，没能干完。",
+		`原因：${err.slice(0, 300)}`,
+		"现在已经换了一个模型继续。",
+		"",
+		"**先核对当前状态再动手**——.auto/notes.md、.auto/runs.csv，以及文件系统里实际变成什么样了，",
+		"判断上次做到哪一步，从那里接着做。**不要重复已经完成的部分**（尤其不要重复起实验）。",
+		"",
+		"原来要做的事：",
+		lastPrompt ?? "（见 .auto/goal.md 和 AGENTS.md）",
+	].join("\n");
+}
+
+/**
+ * agent_end 时判断是否因为额度中断；是的话当前模型进冷却、换下一个、重发。
+ *
+ * 只在 pi 自己放弃之后才介入：pi 内部已有重试逻辑，rate limit / 过载它会自己重试，
+ * 等到 agent_end 还带着 quota 类错误，才轮到我们换模型。
+ */
+async function handleAgentEnd(pi: ExtensionAPI, messages: unknown[]): Promise<void> {
+	if (cfg.modelChain.length === 0) return;
+
+	// 找最后一条以错误终止的 assistant 消息
+	let errText = "";
+	for (const raw of messages) {
+		const m = raw as { role?: string; stopReason?: string; errorMessage?: string };
+		if (m?.role !== "assistant") continue;
+		if (m.stopReason !== "error" && m.stopReason !== "aborted") continue;
+		if (m.errorMessage) errText = m.errorMessage;
+	}
+
+	if (!errText) {
+		// 这一轮正常结束：清零，下一轮从链头开始
+		failoverTried = 0;
+		lastPrompt = undefined;
+		return;
+	}
+
+	// 不是我们触发的这一轮（比如你在手动对话）→ 不自作主张重发
+	if (!lastPrompt) return;
+
+	const kind = classifyError(errText);
+	if (kind === "auth") {
+		notify(
+			`鉴权失败，换模型也没用：${errText.slice(0, 200)}\n去检查这个 provider 的 key，或重新 /login`,
+			"error",
+		);
+		return;
+	}
+	// rate / network / 认不出来 → pi 自己会重试，我们不换模型
+	if (kind !== "quota") return;
+
+	const curKey = currentModelKey();
+	if (curKey) {
+		const mins = extractCooldownMinutes(errText);
+		const ms = (mins ?? cfg.cooldownHours * 60) * 60_000;
+		markCooldown(chainState, curKey, Date.now() + ms);
+	}
+
+	failoverTried += 1;
+	if (failoverTried > cfg.modelChain.length) {
+		notify(
+			`链上所有模型都额度耗尽了，已停止循环。\n恢复时间：${errText.slice(0, 120)}\n等额度恢复，或 /login 一个新的 provider 后用 /rl models 加进链`,
+			"error",
+		);
+		stopPolling();
+		return;
+	}
+
+	if (!(await ensureBestModel(pi))) {
+		notify("链上所有模型都不可用，已停止循环。", "error");
+		stopPolling();
+		return;
+	}
+
+	lastWakeAt = Date.now();
+	pi.sendUserMessage(resumePrompt(errText), { deliverAs: "followUp" });
 }
 
 let cfg: Config = loadConfig();
@@ -121,6 +292,7 @@ function helpText(): string {
 		"  /rl goal <文本>   往 goal 的「临时建议」加一条，下一轮 agent 自动读到",
 		"                   加 -t <工作流> 写到 .auto/goal-<工作流>.md",
 		"  /rl agents       项目里已有 AGENTS.md 时，让 agent 帮你合并（去重 + 精简）",
+		"  /rl models       编辑模型链：额度耗尽时按链的顺序自动切换",
 		"  /rl doctor       环境体检（只读）：ssh、目录、脚本、项目文件",
 		"  /rl setup        首次一站式：生成项目文件 + 交互式配 ssh（需要 TUI 模式）",
 		"  /rl help         显示这个帮助",
@@ -146,13 +318,22 @@ function buildWakeMessage(batch: PendingItem[]): string {
 	return lines.join("\n");
 }
 
-function wake(pi: ExtensionAPI, text: string, escalationKey?: string): void {
+async function wake(pi: ExtensionAPI, text: string, escalationKey?: string): Promise<void> {
 	if (escalationKey) {
 		// 异常升级只做一次，避免 ssh 长期故障时每轮都烧一次
 		if (escalatedOnce.has(escalationKey)) return;
 		escalatedOnce.add(escalationKey);
 	}
+	// 唤醒前把模型调到链里第一个可用的——顺带完成冷却后的回切
+	if (!(await ensureBestModel(pi))) {
+		notify(
+			"链上所有模型都在冷却中，先不唤醒 agent。\n等冷却结束，或 /login 一个新 provider 后用 /rl models 加进链",
+			"warning",
+		);
+		return;
+	}
 	lastWakeAt = Date.now();
+	lastPrompt = text;
 	pi.sendUserMessage(text, { deliverAs: "followUp" });
 }
 
@@ -161,7 +342,7 @@ function maybeWake(pi: ExtensionAPI): void {
 	if (Date.now() - lastWakeAt < cfg.mergeWindowSec * 1000) return;
 	const batch = pending.splice(0, pending.length);
 	for (const b of batch) markHandled(watch, b.key);
-	wake(pi, buildWakeMessage(batch));
+	void wake(pi, buildWakeMessage(batch));
 }
 
 /** ssh 出问题（不是"文件不存在"，是连不上/命令跑不了）时统一处理 */
@@ -170,7 +351,7 @@ function handleSshFailure(pi: ExtensionAPI, res: { err: string; out: string }): 
 	lastStatus = `ssh 失败 ${sshFailCount}/${cfg.sshFailEscalate}`;
 	if (sshFailCount >= cfg.sshFailEscalate) {
 		sshFailCount = 0;
-		wake(
+		void wake(
 			pi,
 			[
 				`轮询 ssh 连续失败 ${cfg.sshFailEscalate} 次，无法确认实验状态。`,
@@ -687,7 +868,7 @@ function stopPolling(): void {
 /** 已知子命令。不在这个集合里的输入都当成「一句话任务」交给 agent */
 const SUBCOMMANDS = new Set([
 	"start", "on", "stop", "off", "status", "goal",
-	"agents", "doctor", "check", "setup", "help", "-h", "--help", "?",
+	"agents", "doctor", "check", "setup", "models", "help", "-h", "--help", "?",
 ]);
 
 /**
@@ -709,6 +890,167 @@ const BOOTSTRAP_PROMPT = [
 	"这一轮的重点是调研和改代码，起实验是为了验证这次改得对不对。",
 	"起完实验记得用 track_run 登记——不登记就没人等它，也不会有任何报错。",
 ].join("\n");
+
+/** 模型链存全局配置（`~/.pi/agent/`）——模型可用性取决于这台机器登录了什么 */
+function saveModelChain(chain: string[]): void {
+	const p = join(homedir(), ".pi", "agent", CONFIG_NAME);
+	let cur: Record<string, unknown> = {};
+	try {
+		if (existsSync(p)) cur = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
+	} catch {
+		cur = {};
+	}
+	cur.modelChain = chain;
+	try {
+		mkdirSync(dirname(p), { recursive: true });
+		writeFileSync(p, `${JSON.stringify(cur, null, 2)}\n`);
+		cfg = loadConfig();
+		chainState = emptyState(); // 链变了，旧的冷却记录作废
+		notify(
+			[`模型链已存到 ${p}`, "", ...chain.map((k, i) => `  ${i + 1}. ${k}`)].join("\n"),
+			"info",
+		);
+	} catch (e) {
+		notify(`写配置失败：${e instanceof Error ? e.message : String(e)}`, "error");
+	}
+}
+
+/**
+ * /rl models —— 编辑模型链。
+ *
+ * 第一屏只有链本身（通常 2–4 项），不铺开全部模型；
+ * 按 a / r 才打开候选列表（只含这台机器已登录 provider 的模型）。
+ */
+async function editModelChain(_pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+	const list = candidateList();
+	if (list.length === 0) {
+		notify("这台机器上没有可用模型。先 /login 登录至少一个 provider。", "warning");
+		return;
+	}
+
+	// 动态引入：TUI 组件万一拿不到，不能把整个扩展拖挂
+	let matchesKey: (data: string, key: string) => boolean;
+	try {
+		const mod = (await import("@earendil-works/pi-tui")) as unknown as {
+			matchesKey: (data: string, key: string) => boolean;
+		};
+		matchesKey = mod.matchesKey;
+	} catch {
+		notify(
+			"TUI 组件不可用，打不开编辑界面。\n请直接改 ~/.pi/agent/research-loop.json 里的 modelChain。",
+			"warning",
+		);
+		return;
+	}
+
+	const curKey = currentModelKey();
+	const chain: string[] = [...cfg.modelChain];
+	if (chain.length === 0 && curKey) chain.push(curKey);
+
+	const allKeys = list.map((c) => keyOf(c));
+	const missing = missingEntries(cfg.modelChain, list);
+	if (missing.length > 0) {
+		notify(`链里有这台机器找不到的模型（多半没登录）：${missing.join("、")}`, "warning");
+	}
+
+	type Outcome = { done: true; chain: string[] } | { action: "add" | "replace"; at?: number } | undefined;
+
+	// 加/替换要弹二级选择（异步），handleInput 里等不了，所以用「返回结果 + 外层循环」
+	for (;;) {
+		const res = await ctx.ui.custom<Outcome>((tui, theme, _kb, done) => {
+			let cursor = 0;
+			const clamp = () => {
+				cursor = Math.max(0, Math.min(cursor, chain.length - 1));
+			};
+			return {
+				render(): string[] {
+					const lines: string[] = [];
+					lines.push(theme.fg("accent", theme.bold("模型链 —— 按此顺序尝试")));
+					lines.push("");
+					if (chain.length === 0) {
+						lines.push(theme.fg("muted", "  （空）按 a 添加"));
+					} else {
+						chain.forEach((k, i) => {
+							const sel = i === cursor;
+							const tag = k === curKey ? "   ← 当前" : "";
+							const txt = `${sel ? "→" : " "} ${i + 1}. ${k}${tag}`;
+							lines.push(sel ? theme.fg("accent", txt) : theme.fg("text", txt));
+						});
+					}
+					lines.push("");
+					lines.push(theme.fg("dim", "↑↓ 选中 · Ctrl+↑/↓ 移动 · a 添加 · r 替换 · d 删除"));
+					lines.push(theme.fg("dim", "Enter 保存 · Esc 取消"));
+					return lines;
+				},
+				handleInput(data: string): boolean {
+					if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+						done(undefined);
+						return true;
+					}
+					if (matchesKey(data, "return")) {
+						done({ done: true, chain: [...chain] });
+						return true;
+					}
+					if (matchesKey(data, "up")) {
+						cursor -= 1;
+						clamp();
+						return true;
+					}
+					if (matchesKey(data, "down")) {
+						cursor += 1;
+						clamp();
+						return true;
+					}
+					if (matchesKey(data, "ctrl+up")) {
+						if (cursor > 0) {
+							[chain[cursor - 1], chain[cursor]] = [chain[cursor]!, chain[cursor - 1]!];
+							cursor -= 1;
+						}
+						return true;
+					}
+					if (matchesKey(data, "ctrl+down")) {
+						if (cursor < chain.length - 1) {
+							[chain[cursor + 1], chain[cursor]] = [chain[cursor]!, chain[cursor + 1]!];
+							cursor += 1;
+						}
+						return true;
+					}
+					if (data === "a") {
+						done({ action: "add" });
+						return true;
+					}
+					if (data === "r") {
+						done({ action: "replace", at: cursor });
+						return true;
+					}
+					if (data === "d") {
+						if (chain.length > 0) {
+							chain.splice(cursor, 1);
+							clamp();
+						}
+						return true;
+					}
+					return false;
+				},
+			};
+		});
+
+		if (res === undefined) {
+			notify("已取消，模型链没改。", "info");
+			return;
+		}
+		if ("done" in res) {
+			saveModelChain(res.chain);
+			return;
+		}
+		// 二级：挑一个模型
+		const picked = await ctx.ui.select(res.action === "add" ? "添加模型到链尾" : "替换选中的模型", allKeys);
+		if (picked) {
+			if (res.action === "add") chain.push(picked);
+			else if (res.at !== undefined) chain[res.at] = picked;
+		}
+	}
+}
 
 async function startLoop(pi: ExtensionAPI, task: string | undefined): Promise<void> {
 	if (isRunning()) {
@@ -741,14 +1083,14 @@ async function startLoop(pi: ExtensionAPI, task: string | undefined): Promise<vo
 	// 这里不能无条件设 lastWakeAt——那样会把「已有实验结果」的首次唤醒
 	// 也一起挡进合并窗口，明明有结果却要等下一轮才报。
 	if (task) {
-		wake(pi, task);
+		await wake(pi, task);
 		notify(`循环已开始 — 你这句话已交给 agent。\n/rl stop 停止`, "info");
 		return;
 	}
 
 	// 没有实验在跑时必须主动开局，否则「等实验」永远等不到东西
 	if (parseTableEntries().length === 0) {
-		wake(pi, BOOTSTRAP_PROMPT);
+		await wake(pi, BOOTSTRAP_PROMPT);
 		notify(`循环已开始 — 表里没有实验，已让 agent 启动第一轮。\n/rl stop 停止`, "info");
 		return;
 	}
@@ -770,6 +1112,15 @@ export default function (pi: ExtensionAPI) {
 			const isStartCmd = !a || a === "start" || a === "on";
 			if (isStartCmd || !SUBCOMMANDS.has(first)) {
 				await startLoop(pi, isStartCmd ? undefined : a);
+				return;
+			}
+
+			if (a === "models") {
+				if (ctx.mode !== "tui") {
+					notify("/rl models 是交互式界面，需要 TUI 模式（当前不是）", "warning");
+					return;
+				}
+				await editModelChain(pi, ctx);
 				return;
 			}
 
@@ -969,6 +1320,11 @@ export default function (pi: ExtensionAPI) {
 				details: { ok: true },
 			};
 		},
+	});
+
+	pi.on("agent_end", (event, ctx) => {
+		lastCtx = ctx;
+		void handleAgentEnd(pi, (event as { messages?: unknown[] }).messages ?? []);
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {

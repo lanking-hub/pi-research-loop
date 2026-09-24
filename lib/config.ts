@@ -34,6 +34,14 @@ export interface Config {
 	sshTimeoutSec: number;
 	/** ssh 连续失败多少次后升级给 LLM */
 	sshFailEscalate: number;
+	/**
+	 * 模型链：额度耗尽时按这个顺序往下切。
+	 * 只在**全局**配置里有意义——模型可用性取决于这台机器登录了哪些 provider。
+	 * 空数组 = 不做自动切换。
+	 */
+	modelChain: string[];
+	/** 错误文案里抠不出「多久恢复」时，用这个小时数冷却 */
+	cooldownHours: number;
 }
 
 export const DEFAULTS: Config = {
@@ -45,6 +53,8 @@ export const DEFAULTS: Config = {
 	mergeWindowSec: 60,
 	sshTimeoutSec: 15,
 	sshFailEscalate: 3,
+	modelChain: [],
+	cooldownHours: 5,
 };
 
 /**
