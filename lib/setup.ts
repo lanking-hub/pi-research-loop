@@ -9,9 +9,9 @@
  *   - **幂等**：已完成的步骤自动跳过，半途失败后重跑是安全的。
  *   - **零配置**：table 模式不需要任何配置文件，配完 ssh 就能跑。
  *
- * 唯一躲不开的手动环节：把公钥装上服务器需要输一次服务器密码。
- * ssh 不从 stdin 读密码（安全设计），没有 PTY 就自动化不了，所以这一步
- * 打印命令 + 等待确认，而不是让用户重跑整个向导。
+ * 唯一躲不开的手动环节：把公钥装上服务器需要服务器密码。向导内输入一次，
+ * 由 ssh2（纯 JS SSH 客户端，不经过任何 shell/终端）自动完成安装；
+ * ssh2 不可用或服务器禁密码登录时，退回「打印命令 + 等确认」的兜底模式。
  */
 
 import { execFile } from "node:child_process";
@@ -26,6 +26,86 @@ const keyscanBin = IS_WIN ? "ssh-keyscan.exe" : "ssh-keyscan";
 const keygenBin = IS_WIN ? "ssh-keygen.exe" : "ssh-keygen";
 
 const MAX_KEY_ATTEMPTS = 3;
+
+/** ssh2 的最小结构类型（避免 lib 层硬依赖 @types/ssh2 也能编译） */
+interface Ssh2Stream {
+	on(event: "data", fn: (d: Buffer) => void): Ssh2Stream;
+	stderr: { on(event: "data", fn: (d: Buffer) => void): unknown };
+	on(event: "close", fn: (code: number) => void): Ssh2Stream;
+}
+interface Ssh2Client {
+	on(event: "ready", fn: () => void): Ssh2Client;
+	on(event: "error", fn: (e: Error) => void): Ssh2Client;
+	exec(cmd: string, cb: (err: Error | undefined, stream: Ssh2Stream) => void): void;
+	end(): void;
+	connect(cfg: Record<string, unknown>): void;
+}
+type Ssh2Ctor = new () => Ssh2Client;
+
+let ssh2Ctor: Ssh2Ctor | undefined; // undefined = 尚未加载成功（下次再试，临时失败不禁用）
+
+/** 动态加载 ssh2：依赖缺失时扩展本身仍能正常加载（走打印命令兜底） */
+async function loadSsh2(): Promise<Ssh2Ctor | undefined> {
+	if (ssh2Ctor) return ssh2Ctor;
+	try {
+		const mod = (await import("ssh2")) as unknown as { Client: Ssh2Ctor };
+		ssh2Ctor = mod.Client;
+	} catch {
+		// 保持 undefined：下次调用重试（装包可能是后来才完成的）
+	}
+	return ssh2Ctor;
+}
+
+/**
+ * ssh2 密码直连装公钥——根治终端兼容问题的主路径。
+ * 全程没有 shell 参与：公钥由 Node 读文件、命令由远端 bash 直接执行，
+ * 因此 PowerShell 剥引号 / 管道注 CR / 终端折行复制 这些坑从物理上不存在。
+ * 密码只活在本函数栈里，绝不写进 lines / ui 输出 / 日志。
+ * 幂等：公钥已在 authorized_keys 里时不重复追加（grep -qF 判定）。
+ */
+async function installKeyViaSsh2(
+	host: string,
+	user: string,
+	password: string,
+	pubKey: string,
+): Promise<{ ok: boolean; err?: string }> {
+	const Client = await loadSsh2();
+	if (!Client) return { ok: false, err: "ssh2 组件不可用（依赖未安装）" };
+	// 远端单引号包裹；公钥是 base64+类型+注释，不会含单引号，转义纯防御
+	const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+	const key = pubKey.trim();
+	const cmd = [
+		"mkdir -p ~/.ssh && chmod 700 ~/.ssh",
+		`grep -qF ${q(key)} ~/.ssh/authorized_keys 2>/dev/null || echo ${q(key)} >> ~/.ssh/authorized_keys`,
+		"chmod 600 ~/.ssh/authorized_keys && rm -f ~/rl-pub.tmp",
+	].join(" && ");
+	return await new Promise((resolve) => {
+		const conn = new Client();
+		const done = (r: { ok: boolean; err?: string }) => {
+			clearTimeout(timer);
+			try {
+				conn.end();
+			} catch {
+				/* 已断开 */
+			}
+			resolve(r);
+		};
+		const timer = setTimeout(() => done({ ok: false, err: "连接超时（20s）" }), 20000);
+		conn.on("ready", () => {
+			conn.exec(cmd, (err, stream) => {
+				if (err) return done({ ok: false, err: err.message });
+				let eout = "";
+				stream.stderr.on("data", (d: Buffer) => (eout += d.toString()));
+				stream.on("close", (code: number) => {
+					if (code === 0) return done({ ok: true });
+					done({ ok: false, err: `远端命令失败（退出码 ${code}）：${eout.trim().slice(0, 300)}` });
+				});
+			});
+		});
+		conn.on("error", (e) => done({ ok: false, err: e.message }));
+		conn.connect({ host, port: 22, username: user, password, readyTimeout: 15000 });
+	});
+}
 
 /** 交互能力的最小接口——lib 不依赖 pi 的类型，方便单独测试 */
 export interface SetupUI {
@@ -255,27 +335,49 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 			}
 		}
 
-		// 装公钥的命令必须在 cmd.exe / PowerShell / zsh 下都被**原样**传递。
-		// 实测教训（2026-09-23）：`type 公钥 | ssh ... "tr -d '\r' >> ..."` 在 cmd 里
-		// 是对的，但 PowerShell 给原生命令传参时会按自己的规则重剥引号——单引号
-		// 消失，远端 bash 拿到散架的 `tr -d`（missing operand）+ `\r`（command not found）。
-		// 因此 Windows 版改成两条命令：
-		//   1) scp 把公钥文件按字节直传成服务器临时文件——PowerShell 管道注入 CRLF
-		//      的问题从根上消失，远端不再需要 tr；
-		//   2) 第二条 ssh 的远端命令里【零引号、零反斜杠、零 $】——任何 shell 都只会
-		//      原样传递。cmd 与 PowerShell 5.1/7 实测通过，scp/ssh 两路 md5 字节级一致。
-		// 代价：密码要输两次（scp 一次、ssh 一次）。
-		// macOS 保持管道版：zsh/bash 不会剥双引号字符串里的单引号，一条命令一次密码。
-		const winRemote =
-			"mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat ~/rl-pub.tmp >> ~/.ssh/authorized_keys && rm ~/rl-pub.tmp && chmod 600 ~/.ssh/authorized_keys";
-		const macRemote =
-			"mkdir -p ~/.ssh && chmod 700 ~/.ssh && tr -d '\\r' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys";
+		// ── 装公钥：主路径 = 向导内闭环（ssh2），兜底 = 打印命令 ──
+		// 主路径全程无 shell 参与（引号/CRLF/折行这些终端坑从物理上不存在）。
+		// 兜底命令的历史教训（2026-09-23/24）：PowerShell 会剥原生命令参数里的
+		// 单引号；从 TUI 复制折行长命令会带上换行。所以兜底命令必须是若干条
+		// 「≤~105 字符的独立完整命令」——多行整块粘贴时换行只会落在命令之间。
 		const pubWin = pubKeyPath.replace(/\//g, "\\");
-		const installCmds: string[] = IS_WIN
-			? [`scp "${pubWin}" ${user}@${host}:rl-pub.tmp`, `ssh ${user}@${host} "${winRemote}"`]
-			: [`cat ${pubKeyPath} | ssh ${user}@${host} "${macRemote}"`];
-		const installCmdText = installCmds.join("\n  ");
-		const pwTimes = IS_WIN ? "两条命令各输一次密码" : "输一次服务器密码";
+		const fallbackCmds: string[] = IS_WIN
+			? [
+					`scp "${pubWin}" ${user}@${host}:rl-pub.tmp`,
+					`ssh ${user}@${host} "mkdir -p ~/.ssh && cat ~/rl-pub.tmp >> ~/.ssh/authorized_keys"`,
+					`ssh ${user}@${host} "rm ~/rl-pub.tmp && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"`,
+				]
+			: [`cat ${pubKeyPath} | ssh ${user}@${host} "mkdir -p ~/.ssh && chmod 700 ~/.ssh && tr -d '\\r' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"`];
+		const pwTimes = IS_WIN ? "三条命令各输一次密码（共 3 次）" : "输一次服务器密码";
+
+		const ssh2 = await loadSsh2();
+		let password: string | undefined;
+		if (ssh2) {
+			lines.push("");
+			lines.push("把公钥装上服务器需要一次密码验证（之后永久免密）。");
+			password = await ui.ask(`输入 ${user}@${host} 的密码`, "仅本次使用，不会保存");
+		} else {
+			lines.push("");
+			lines.push("-- 自动安装组件（ssh2）不可用，改用手动方式。");
+		}
+		if (ssh2 && password) {
+			ui.status("正在自动安装公钥（ssh2 直连，不经过终端）…");
+			const pub = readFileSync(pubKeyPath, "utf8");
+			const res = await installKeyViaSsh2(host, user, password, pub);
+			password = ""; // 用完立刻丢弃
+			if (res.ok) {
+				lines.push("✓ 公钥已自动装上服务器");
+				ui.status("正在重新检查连接 …");
+				continue;
+			}
+			lines.push(`✗ 自动安装失败：${res.err}`);
+			lines.push("  改用手动方式：");
+		} else if (ssh2 && password === "") {
+			lines.push("已跳过。改用手动方式：");
+		} else if (ssh2 && password === undefined) {
+			lines.push("已取消。随时重跑 /rl setup 继续（前面的步骤会自动跳过）。");
+			return { lines, done: false, needsAttention: false };
+		}
 
 		lines.push("");
 		if (attempt > 1) {
@@ -283,11 +385,8 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 			lines.push("多半不是公钥没装上，而是服务器端 ~/.ssh 权限不对。");
 		}
 		lines.push("还差一步：把公钥装到服务器（装完永久免密）。");
-		lines.push("**另开一个终端**逐条执行：");
-		for (const c of installCmds) lines.push(`  ${c}`);
-		if (IS_WIN) {
-			lines.push("  cmd.exe 和 PowerShell 都可以（命令已实测兼容两种终端）。");
-		}
+		lines.push("**另开一个终端**逐条执行（可整块复制，每行都是完整命令）：");
+		for (const c of fallbackCmds) lines.push(`  ${c}`);
 		lines.push("");
 
 		// 关键：confirm 是中途弹的，而报告要等 setup 跑完才统一输出。
@@ -297,7 +396,7 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		saidUpTo = lines.length;
 		const ok = await ui.confirm(
 			"公钥装好了吗？",
-			`另开终端逐条执行：\n\n  ${installCmdText}\n\n${pwTimes}。执行完选 Yes 继续。`,
+			`另开终端逐条执行：\n\n  ${fallbackCmds.join("\n  ")}\n\n${pwTimes}。执行完选 Yes 继续。`,
 		);
 		if (!ok) {
 			lines.push("已取消。随时重跑 /rl setup 继续（前面的步骤会自动跳过）。");
@@ -316,7 +415,7 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 	lines.push(`✓ 免密连通：ssh ${alias}`);
 
 	ui.status("正在修正服务器端 ssh 权限 …");
-	await runRemote(alias, "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys", 10);
+	await runRemote(alias, "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && rm -f ~/rl-pub.tmp", 10);
 	ui.status(undefined);
 	lines.push("✓ 服务器端 ssh 权限已确认（700/600）");
 

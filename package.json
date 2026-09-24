@@ -2,10 +2,17 @@
   "name": "pi-research-loop",
   "version": "0.1.0",
   "description": "Autonomous research iteration loop driver for pi — poll remote experiment runs, wake the agent when results land.",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "license": "MIT",
+  "dependencies": {
+    "ssh2": "^1.16.0"
+  },
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./extensions"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
