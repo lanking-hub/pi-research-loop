@@ -639,14 +639,23 @@ async function doctor(): Promise<void> {
 	const goalFiles = existsSync(autoDir)
 		? readdirSync(autoDir).filter((f) => /^goal[A-Za-z0-9_-]*\.md$/i.test(f))
 		: [];
-	if (goalFiles.length > 0) {
-		lines.push(
-			goalFiles.length === 1
-				? `✓ .auto/${goalFiles[0]}`
-				: `✓ goal ${goalFiles.length} 份：${goalFiles.map((f) => `.auto/${f}`).join("、")}`,
-		);
-	} else {
+	if (goalFiles.length === 0) {
 		lines.push(`-- 缺少 .auto/goal.md（跑 /rl setup 会生成）`);
+	} else {
+		const g = goalStatus();
+		if (g.exists && g.missing.length > 0) {
+			// 文件在但没填：这比「文件不在」更该报——
+			// 扩展会照常开局，而 agent 拿不到方向
+			problems += 1;
+			lines.push(`✗ .auto/goal.md 还没填：${g.missing.join("、")}`);
+			lines.push(`  没填的话 agent 开局没有方向（这种情况下 /rl 会直接拒绝启动）`);
+		} else {
+			lines.push(
+				goalFiles.length === 1
+					? `✓ .auto/${goalFiles[0]}`
+					: `✓ goal ${goalFiles.length} 份：${goalFiles.map((f) => `.auto/${f}`).join("、")}`,
+			);
+		}
 	}
 	for (const f of [".auto/notes.md", "AGENTS.md"]) {
 		if (existsSync(join(process.cwd(), f))) {
@@ -836,6 +845,39 @@ function ensureProjectFiles(): string[] {
 function goalPath(track: string | undefined): string {
 	const name = track && /^[A-Za-z0-9_-]+$/.test(track) ? `goal-${track}.md` : "goal.md";
 	return join(process.cwd(), ".auto", name);
+}
+
+/**
+ * goal 里**必须**填的章节。
+ *
+ * 少了这两个，agent 开局就没有方向——AGENTS.md 只告诉它「去读 goal」，
+ * 如果 goal 还是模板（全是 TODO），它等于什么都没拿到。
+ */
+const GOAL_REQUIRED = ["我在做什么", "大致方向"];
+
+/** 取某个 `## 章节` 的正文，注释和空行不算内容 */
+function sectionBody(md: string, heading: string): string {
+	const out: string[] = [];
+	let collecting = false;
+	for (const l of md.split("\n")) {
+		if (/^##\s+/.test(l)) {
+			collecting = l.trim().replace(/^#+\s*/, "") === heading;
+			continue;
+		}
+		if (collecting) out.push(l);
+	}
+	return out
+		.join("\n")
+		.replace(/<!--[\s\S]*?-->/g, "")
+		.trim();
+}
+
+/** 默认那份 goal（`goal.md`）填没填。拆成 goal-iter/baseline 的话由你自己维护，这里不查。 */
+function goalStatus(): { exists: boolean; missing: string[] } {
+	const p = join(process.cwd(), ".auto", "goal.md");
+	if (!existsSync(p)) return { exists: false, missing: [] };
+	const text = readFileSync(p, "utf8");
+	return { exists: true, missing: GOAL_REQUIRED.filter((s) => !sectionBody(text, s)) };
 }
 
 /**
@@ -1149,6 +1191,27 @@ async function startLoop(pi: ExtensionAPI, task: string | undefined): Promise<vo
 	if (!isConfigured(cfg)) {
 		notify("配置未完成，先填 sshHost（没配过就跑 /rl setup）", "warning");
 		return;
+	}
+
+	// 空表开局（既没给一句话任务、也没有在跑的实验）时，goal 没填就不开局。
+	// 这时候 agent 拿不到任何方向——AGENTS.md 只让它「去读 goal」，
+	// 而 goal 还是模板的话，它等于什么都没拿到，只能瞎试。
+	if (!task && parseTableEntries().length === 0) {
+		const g = goalStatus();
+		if (g.exists && g.missing.length > 0) {
+			notify(
+				[
+					`没启动 —— .auto/goal.md 还没填：${g.missing.join("、")}`,
+					"",
+					"goal 是 agent 唯一的方向来源。先填这几项：",
+					...g.missing.map((s) => `  · ${s}`),
+					"",
+					"填完再 /rl。想先给一句临时方向也行：/rl goal <一句话>",
+				].join("\n"),
+				"warning",
+			);
+			return;
+		}
 	}
 
 	try {
