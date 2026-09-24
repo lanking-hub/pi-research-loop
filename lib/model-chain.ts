@@ -36,6 +36,48 @@ const QUOTA_PATTERN =
 const RATE_PATTERN = /rate[_-]?limit|too many requests|\b429\b|overloaded|high demand|capacity/i;
 const NETWORK_PATTERN = /fetch failed|econnreset|econnrefused|enotfound|socket hang|timed? ?out|network error|dns/i;
 
+/**
+ * 从消息里能拿到的错误线索，按可靠度排序。
+ *
+ * `code` 来自 AssistantMessage.diagnostics[].error.code，是 provider 给的**结构化错误码**
+ * （`usage_limit_reached` / `insufficient_quota` / `rate_limit_exceeded`…），
+ * 比匹配文案可靠得多——但只有部分 provider 会填，所以其余字段仍要兜底。
+ */
+export interface ErrorSignal {
+	code?: string | number;
+	name?: string;
+	type?: string;
+	message?: string;
+}
+
+// 结构化错误码。这是最可信的一层，尽量避免依赖文案。
+const QUOTA_CODE =
+	/usage_limit_reached|usage_not_included|insufficient_quota|quota_exceeded|out_of_budget|insufficient_balance|billing/i;
+const RATE_CODE = /rate_limit|rate_limit_exceeded|too_many_requests|overloaded|^429$/i;
+const AUTH_CODE = /unauthorized|authentication_failed|invalid_api_key|permission_denied|forbidden|^401$/i;
+
+/** 推荐入口：把从消息里挖到的线索全给它，它自己按可靠度判断 */
+export function classify(sig: ErrorSignal): FailoverKind {
+	// 1) 结构化错误码最可信
+	const code = sig.code !== undefined ? String(sig.code) : "";
+	if (code) {
+		if (AUTH_CODE.test(code)) return "auth";
+		if (QUOTA_CODE.test(code)) return "quota";
+		if (RATE_CODE.test(code)) return "rate";
+	}
+	// 2) 错误名（如 GoUsageLimitError）
+	const name = sig.name ?? "";
+	if (name) {
+		if (AUTH_PATTERN.test(name)) return "auth";
+		if (QUOTA_PATTERN.test(name)) return "quota";
+		if (RATE_PATTERN.test(name)) return "rate";
+	}
+	// 3) 最后才是文案
+	const text = [sig.type, sig.message].filter(Boolean).join(" ");
+	return classifyError(text);
+}
+
+/** 只有文案时的判断。classify() 会兜到这里。 */
 export function classifyError(text: string): FailoverKind {
 	if (!text) return "none";
 	if (AUTH_PATTERN.test(text)) return "auth";

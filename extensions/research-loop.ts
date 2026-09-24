@@ -58,8 +58,9 @@ import {
 	type Config,
 } from "../lib/config.ts";
 import {
-	classifyError,
+	classify,
 	emptyState,
+	type ErrorSignal,
 	extractCooldownMinutes,
 	keyOf,
 	markCooldown,
@@ -179,16 +180,30 @@ async function handleAgentEnd(pi: ExtensionAPI, messages: unknown[]): Promise<vo
 	// 只在循环运行时介入。循环停了之后你在手动对话，出错也不该自作主张重发上一轮的任务。
 	if (!timer) return;
 
-	// 找最后一条以错误终止的 assistant 消息
+	// 找最后一条以错误终止的 assistant 消息。
+	// 优先取 diagnostics 里的结构化错误码（比匹配文案可靠），取不到就用文案兜底。
 	let errText = "";
+	let sig: ErrorSignal | undefined;
 	for (const raw of messages) {
-		const m = raw as { role?: string; stopReason?: string; errorMessage?: string };
+		const m = raw as {
+			role?: string;
+			stopReason?: string;
+			errorMessage?: string;
+			diagnostics?: {
+				type?: string;
+				error?: { code?: string | number; name?: string; message?: string };
+			}[];
+		};
 		if (m?.role !== "assistant") continue;
 		if (m.stopReason !== "error" && m.stopReason !== "aborted") continue;
-		if (m.errorMessage) errText = m.errorMessage;
+		const d = [...(m.diagnostics ?? [])].reverse().find((x) => x?.error || x?.type);
+		errText = m.errorMessage || d?.error?.message || "";
+		if (errText || d?.error?.code !== undefined || d?.error?.name || d?.type) {
+			sig = { code: d?.error?.code, name: d?.error?.name, type: d?.type, message: errText };
+		}
 	}
 
-	if (!errText) {
+	if (!sig) {
 		// 这一轮正常结束：清零，下一轮从链头开始
 		failoverTried = 0;
 		lastPrompt = undefined;
@@ -198,7 +213,7 @@ async function handleAgentEnd(pi: ExtensionAPI, messages: unknown[]): Promise<vo
 	// 不是我们触发的这一轮（比如你在手动对话）→ 不自作主张重发
 	if (!lastPrompt) return;
 
-	const kind = classifyError(errText);
+	const kind = classify(sig);
 	if (kind === "auth") {
 		notify(
 			`鉴权失败，换模型也没用：${errText.slice(0, 200)}\n去检查这个 provider 的 key，或重新 /login`,
