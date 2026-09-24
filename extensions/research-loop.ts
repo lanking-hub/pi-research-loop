@@ -193,6 +193,14 @@ async function ensureBestModel(pi: ExtensionAPI): Promise<boolean> {
 	return false;
 }
 
+/** 链上最早的冷却什么时候结束。全都冷却时告诉用户还要等多久，别让他以为卡死了 */
+function cooldownEta(): string {
+	const soon = Object.values(chainState.cooldownUntil).filter((t) => t > Date.now());
+	if (soon.length === 0) return "";
+	const mins = Math.max(1, Math.ceil((Math.min(...soon) - Date.now()) / 60000));
+	return `最早 ${mins} 分钟后有模型恢复——那时再来实验结果就会自动继续。`;
+}
+
 /** 换模型后重发的话术：带上原文，但要求它先核对状态别重复干活 */
 function resumePrompt(err: string): string {
 	return [
@@ -284,8 +292,13 @@ async function handleAgentEnd(pi: ExtensionAPI, messages: unknown[]): Promise<vo
 	}
 
 	if (!(await ensureBestModel(pi))) {
-		notify("链上所有模型都不可用，已停止循环。", "error");
-		stopPolling();
+		// 全链都在冷却 → **不停止循环**。轮询是零 token 的，等着就行。
+		// 停了反而再也起不来：没有实验完成就不会有下一次唤醒，
+		// 那刚把冷却缩到 1 小时就白设了。
+		notify(
+			`链上所有模型都在冷却中。循环继续跑，先不唤醒 agent。\n${cooldownEta()}\n想立刻恢复就 /login 一个新 provider，再用 /rl models 加进链`,
+			"warning",
+		);
 		return;
 	}
 
@@ -333,10 +346,18 @@ function notify(msg: string, level: "info" | "warning" | "error" = "info"): void
 
 /** status 分两行写清楚：上面是扩展自身，下面是实验。别混在一条字符串里。 */
 function statusText(): string {
-	return [
+	const lines = [
 		`循环：${isRunning() ? "运行中" : "已停止"}（每 ${cfg.pollIntervalSec}s 盯一次实验）`,
 		`实验：${lastStatus}`,
-	].join("\n");
+	];
+	// 全链冷却时循环还在跑但不唤醒，状态栏必须说清楚在等什么，
+	// 否则看起来跟「卡死了」一模一样
+	const cooling = Object.values(chainState.cooldownUntil).filter((t) => t > Date.now());
+	if (cooling.length > 0) {
+		const mins = Math.max(1, Math.ceil((Math.min(...cooling) - Date.now()) / 60000));
+		lines.push(`模型：${cooling.length} 个在冷却，最早 ${mins} 分钟后恢复`);
+	}
+	return lines.join("\n");
 }
 
 function helpText(): string {
@@ -388,7 +409,7 @@ async function wake(pi: ExtensionAPI, text: string, escalationKey?: string): Pro
 	// 唤醒前把模型调到链里第一个可用的——顺带完成冷却后的回切
 	if (!(await ensureBestModel(pi))) {
 		notify(
-			"链上所有模型都在冷却中，先不唤醒 agent。\n等冷却结束，或 /login 一个新 provider 后用 /rl models 加进链",
+			`链上所有模型都在冷却中，先不唤醒 agent。\n${cooldownEta()}\n想立刻恢复就 /login 一个新 provider，再用 /rl models 加进链`,
 			"warning",
 		);
 		return false;
