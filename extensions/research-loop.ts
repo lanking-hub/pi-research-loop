@@ -176,6 +176,8 @@ function resumePrompt(err: string): string {
  */
 async function handleAgentEnd(pi: ExtensionAPI, messages: unknown[]): Promise<void> {
 	if (cfg.modelChain.length === 0) return;
+	// 只在循环运行时介入。循环停了之后你在手动对话，出错也不该自作主张重发上一轮的任务。
+	if (!timer) return;
 
 	// 找最后一条以错误终止的 assistant 消息
 	let errText = "";
@@ -318,31 +320,44 @@ function buildWakeMessage(batch: PendingItem[]): string {
 	return lines.join("\n");
 }
 
-async function wake(pi: ExtensionAPI, text: string, escalationKey?: string): Promise<void> {
-	if (escalationKey) {
-		// 异常升级只做一次，避免 ssh 长期故障时每轮都烧一次
-		if (escalatedOnce.has(escalationKey)) return;
-		escalatedOnce.add(escalationKey);
-	}
+/**
+ * @returns 是否真的发出去了。调用方**必须**看这个返回值——
+ *          发出去才可以把队列里的项标记为已处理，否则结果就静默丢了。
+ */
+async function wake(pi: ExtensionAPI, text: string, escalationKey?: string): Promise<boolean> {
+	// 异常升级只做一次，避免 ssh 长期故障时每轮都烧一次
+	if (escalationKey && escalatedOnce.has(escalationKey)) return false;
+
 	// 唤醒前把模型调到链里第一个可用的——顺带完成冷却后的回切
 	if (!(await ensureBestModel(pi))) {
 		notify(
 			"链上所有模型都在冷却中，先不唤醒 agent。\n等冷却结束，或 /login 一个新 provider 后用 /rl models 加进链",
 			"warning",
 		);
-		return;
+		return false;
 	}
+
+	// 成功发出后才记「已升级」：没发出去就不算，下一轮还能再报
+	if (escalationKey) escalatedOnce.add(escalationKey);
 	lastWakeAt = Date.now();
 	lastPrompt = text;
 	pi.sendUserMessage(text, { deliverAs: "followUp" });
+	return true;
 }
 
-function maybeWake(pi: ExtensionAPI): void {
+async function maybeWake(pi: ExtensionAPI): Promise<void> {
 	if (pending.length === 0) return;
 	if (Date.now() - lastWakeAt < cfg.mergeWindowSec * 1000) return;
+
 	const batch = pending.splice(0, pending.length);
-	for (const b of batch) markHandled(watch, b.key);
-	void wake(pi, buildWakeMessage(batch));
+	// 先发，成功才标记已处理。否则结果会被「已处理」掉却根本没告诉 agent。
+	const sent = await wake(pi, buildWakeMessage(batch));
+	if (sent) {
+		for (const b of batch) markHandled(watch, b.key);
+	} else {
+		// 没发出去：原样放回队首，下一轮再试
+		pending.unshift(...batch);
+	}
 }
 
 /** ssh 出问题（不是"文件不存在"，是连不上/命令跑不了）时统一处理 */
@@ -539,7 +554,7 @@ async function pollTable(pi: ExtensionAPI): Promise<void> {
 	}
 
 	lastStatus = `在跑 ${running}，待处理 ${pending.length}`;
-	maybeWake(pi);
+	await maybeWake(pi);
 }
 
 async function poll(pi: ExtensionAPI): Promise<void> {
@@ -847,6 +862,7 @@ async function startPolling(pi: ExtensionAPI): Promise<void> {
 	escalatedOnce = new Set();
 	sshFailCount = 0;
 	pending = []; // 丢掉上次残留，否则会用陈旧内容唤醒
+	failoverTried = 0; // 新开一轮循环，换模型重试的次数重新计数
 
 	// 注意：**启动时不要预标记任何 run 为已报过**。
 	// 以前有个 primeHandled() 会把启动那一刻已终态的 run 标为 handled，
@@ -1083,15 +1099,25 @@ async function startLoop(pi: ExtensionAPI, task: string | undefined): Promise<vo
 	// 这里不能无条件设 lastWakeAt——那样会把「已有实验结果」的首次唤醒
 	// 也一起挡进合并窗口，明明有结果却要等下一轮才报。
 	if (task) {
-		await wake(pi, task);
-		notify(`循环已开始 — 你这句话已交给 agent。\n/rl stop 停止`, "info");
+		const sent = await wake(pi, task);
+		notify(
+			sent
+				? `循环已开始 — 你这句话已交给 agent。\n/rl stop 停止`
+				: `循环已开始，但你这句话**没发出去**（见上面的提示）。\n解决后重试，或直接打字跟 agent 说`,
+			sent ? "info" : "warning",
+		);
 		return;
 	}
 
 	// 没有实验在跑时必须主动开局，否则「等实验」永远等不到东西
 	if (parseTableEntries().length === 0) {
-		await wake(pi, BOOTSTRAP_PROMPT);
-		notify(`循环已开始 — 表里没有实验，已让 agent 启动第一轮。\n/rl stop 停止`, "info");
+		const sent = await wake(pi, BOOTSTRAP_PROMPT);
+		notify(
+			sent
+				? `循环已开始 — 表里没有实验，已让 agent 启动第一轮。\n/rl stop 停止`
+				: `循环已开始，但**没能叫醒 agent 开局**（见上面的提示）。`,
+			sent ? "info" : "warning",
+		);
 		return;
 	}
 
