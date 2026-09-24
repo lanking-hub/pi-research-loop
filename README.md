@@ -74,7 +74,7 @@ Then it configures ssh, asking only two things: **server address** and **usernam
 
 After that it runs by itself: generate a keypair → write the alias into `~/.ssh/config` → register the host key → set up passwordless login.
 
-(The ssh alias is a fixed internal constant, `research-loop-server`. You never need to know it or configure it. If your `~/.ssh/config` already has an entry with that name pointing somewhere else, setup detects it and reports an error rather than silently connecting to the wrong machine.)
+The alias is a fixed internal constant, `research-loop-server` — setup writes it into `~/.ssh/config`, and it is what every `ssh {{SSH_ALIAS}}` in the generated `AGENTS.md` is replaced with. You never need to configure it; set `sshHost` in `.pi/research-loop.json` only if you want a different name. If your `~/.ssh/config` already has an entry with that name pointing somewhere else, setup detects it and reports an error rather than silently connecting to the wrong machine.
 
 The one manual step: **install your public key on the server** (needs your password once). The wizard prints the command and **waits in place** for you — run it in another terminal, come back, pick Yes, and it continues. **No need to re-run setup.**
 
