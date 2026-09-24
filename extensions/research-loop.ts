@@ -1021,7 +1021,8 @@ async function editModelChain(_pi: ExtensionAPI, ctx: ExtensionContext): Promise
 			return {
 				render(): string[] {
 					const lines: string[] = [];
-					lines.push(theme.fg("accent", theme.bold("模型链 —— 按此顺序尝试")));
+					lines.push(theme.fg("accent", theme.bold("模型链 —— 越靠前越优先，额度用完就往下切")));
+					lines.push(theme.fg("muted", "第 1 个是首选；它限额了用第 2 个，以此类推"));
 					lines.push("");
 					if (chain.length === 0) {
 						lines.push(theme.fg("muted", "  （空）按 a 添加"));
@@ -1034,7 +1035,7 @@ async function editModelChain(_pi: ExtensionAPI, ctx: ExtensionContext): Promise
 						});
 					}
 					lines.push("");
-					lines.push(theme.fg("dim", "↑↓ 选中 · [ ] 移动 · a 添加 · r 替换 · d 删除"));
+					lines.push(theme.fg("dim", "↑↓ 选中 · [ ] 调整前后顺序 · a 添加 · r 替换 · d 删除"));
 					lines.push(theme.fg("dim", "Enter 保存 · Esc 取消"));
 					return lines;
 				},
