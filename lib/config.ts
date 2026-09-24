@@ -53,7 +53,14 @@ export interface Config {
 	 * 空数组 = 不做自动切换。
 	 */
 	modelChain: string[];
-	/** 错误文案里抠不出「多久恢复」时，用这个小时数冷却 */
+	/**
+	 * 冷却小时数。模型报额度问题时先晾这么久，之后自然回到链头再试。
+	 *
+	 * 刻意取**短**（1 小时）而不是去猜 provider 说的恢复时间：
+	 * 各家文案措辞五花八门，抠不准；而一次失败调用的代价很低（额度错误
+	 * 不消耗 token），用「低频重试」比「精确算恢复时间」简单也够用。
+	 * 只有当文案明确给出**更长**的恢复时间时才按它的来，免得白跑一趟。
+	 */
 	cooldownHours: number;
 }
 
@@ -68,7 +75,7 @@ export const DEFAULTS: Config = {
 	sshTimeoutSec: 15,
 	sshFailEscalate: 3,
 	modelChain: [],
-	cooldownHours: 5,
+	cooldownHours: 1,
 };
 
 /**

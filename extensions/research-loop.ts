@@ -265,9 +265,12 @@ async function handleAgentEnd(pi: ExtensionAPI, messages: unknown[]): Promise<vo
 
 	const curKey = currentModelKey();
 	if (curKey) {
-		const mins = extractCooldownMinutes(errText);
-		const ms = (mins ?? cfg.cooldownHours * 60) * 60_000;
-		markCooldown(chainState, curKey, Date.now() + ms);
+		// 冷却时长 = 默认 1 小时，但文案里明确给了**更长**的恢复时间就按它的来
+		// （比如 "Try again in ~192 min"），免得 1 小时后白跑一趟。
+		// 反过来文案给得更短（30s 那种）也不跟着缩短——重试太频繁没意义。
+		const hinted = extractCooldownMinutes(errText);
+		const mins = Math.max(cfg.cooldownHours * 60, hinted ?? 0);
+		markCooldown(chainState, curKey, Date.now() + mins * 60_000);
 	}
 
 	failoverTried += 1;
