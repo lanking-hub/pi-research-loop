@@ -941,8 +941,21 @@ const BOOTSTRAP_PROMPT = [
 	"起完实验记得用 track_run 登记——不登记就没人等它，也不会有任何报错。",
 ].join("\n");
 
+/**
+ * 去重 + 去空白。
+ *
+ * 重复项不是 bug——`pickAvailable` 顺序遍历，同一个模型的冷却状态一样，
+ * 第二遍必然也被跳过，所以留着不会出错。但会让人误以为「挂了会再试一次」，
+ * 而实际不会。让配置的长相和实际行为一致。
+ */
+function normalizeChain(chain: string[]): string[] {
+	return [...new Set(chain.map((s) => s.trim()).filter(Boolean))];
+}
+
 /** 模型链存全局配置（`~/.pi/agent/`）——模型可用性取决于这台机器登录了什么 */
 function saveModelChain(chain: string[]): void {
+	const deduped = normalizeChain(chain);
+	const removed = chain.length - deduped.length;
 	const p = join(homedir(), ".pi", "agent", CONFIG_NAME);
 	let cur: Record<string, unknown> = {};
 	try {
@@ -950,16 +963,16 @@ function saveModelChain(chain: string[]): void {
 	} catch {
 		cur = {};
 	}
-	cur.modelChain = chain;
+	cur.modelChain = deduped;
 	try {
 		mkdirSync(dirname(p), { recursive: true });
 		writeFileSync(p, `${JSON.stringify(cur, null, 2)}\n`);
 		cfg = loadConfig();
 		chainState = emptyState(); // 链变了，旧的冷却记录作废
-		notify(
-			[`模型链已存到 ${p}`, "", ...chain.map((k, i) => `  ${i + 1}. ${k}`)].join("\n"),
-			"info",
-		);
+		const lines = [`模型链已存到 ${p}`];
+		if (removed > 0) lines.push(`（去掉了 ${removed} 个重复项）`);
+		lines.push("", ...deduped.map((k, i) => `  ${i + 1}. ${k}`));
+		notify(lines.join("\n"), "info");
 	} catch (e) {
 		notify(`写配置失败：${e instanceof Error ? e.message : String(e)}`, "error");
 	}
@@ -1108,8 +1121,15 @@ async function editModelChain(_pi: ExtensionAPI, ctx: ExtensionContext): Promise
 		// 二级：挑一个模型
 		const picked = await ctx.ui.select(res.action === "add" ? "添加模型到链尾" : "替换选中的模型", allKeys);
 		if (picked) {
-			if (res.action === "add") chain.push(picked);
-			else if (res.at !== undefined) chain[res.at] = picked;
+			if (res.action === "add") {
+				if (chain.includes(picked)) {
+					notify(`${picked} 已经在链里了，跳过。`, "info");
+				} else {
+					chain.push(picked);
+				}
+			} else if (res.at !== undefined) {
+				chain[res.at] = picked;
+			}
 		}
 	}
 }
