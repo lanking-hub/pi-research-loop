@@ -220,7 +220,7 @@ function findAliasBlock(alias: string): { exists: boolean; hostName?: string } {
 	return { exists: seen, hostName };
 }
 
-export async function runSetup(ui: SetupUI): Promise<SetupReport> {
+export async function runSetup(ui: SetupUI, presets?: { host?: string; user?: string }): Promise<SetupReport> {
 	const lines: string[] = [];
 	let problems = 0;
 	let attention = false;
@@ -295,14 +295,14 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 		return { lines, done: false, needsAttention: true };
 	}
 
-	// ── 3. 只问两件事：服务器地址、用户名 ──────────────────
-	const host = (await ui.ask("服务器地址（IP 或域名）", "例如 192.168.1.50"))?.trim();
+	// ── 3. 只问两件事：服务器地址、用户名（命令行带参时预填，回车即确认）──
+	const host = (await ui.ask("服务器地址（IP 或域名）", presets?.host ?? "例如 192.168.1.50"))?.trim() ?? presets?.host ?? "";
 	if (!host) {
 		lines.push("✗ 未获取服务器地址，已取消");
 		return { lines, done: false, needsAttention: false };
 	}
 
-	const user = (await ui.ask("登录用户名", "例如 zhangsan"))?.trim();
+	const user = (await ui.ask("登录用户名", presets?.user ?? "例如 zhangsan"))?.trim() ?? presets?.user ?? "";
 	if (!user) {
 		lines.push("✗ 未获取用户名，已取消");
 		return { lines, done: false, needsAttention: false };

@@ -1463,28 +1463,37 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			if (a === "setup") {
+			// /rl setup 及 /rl setup <IP> <用户名> 都接受（带参 = 预填向导里的地址/用户名）
+			if (a === "setup" || a.startsWith("setup ")) {
 				if (ctx.mode !== "tui") {
 					notify("/rl setup 是交互式向导，需要 TUI 模式（当前不是）", "warning");
 					return;
 				}
+				const parts = a.split(/\s+/).filter(Boolean);
+				const presets = { host: parts[1], user: parts[2] };
 				// 一站式：先生成/补齐项目文件，再配 ssh 和服务器
 				const fileLines = ensureProjectFiles();
-				const report = await runSetup({
-					ask: (title, placeholder) => ctx.ui.input(title, placeholder),
-					confirm: (title, message) => ctx.ui.confirm(title, message),
-					say: (text) => notify(text, "info"),
-					// 诊断增强（2026-09-24）：ssh2 主路径失败时用 error 级弹窗强提醒，
-					// 确保失败原因不会被后续输出刷掉（owner 实测时没看到失败原因行）
-					setupError: (text) => notify(text, "error"),
-					status: (text) => {
-						try {
-							ctx.ui.setWidget("rl-setup", text ? [text] : undefined, { placement: "aboveEditor" });
-						} catch {
-							// 没 UI 就算了
-						}
+				const report = await runSetup(
+					{
+						ask: (title, placeholder) => {
+							// 带参调用时把预填值放进输入框（title 不可变，改用初始文本注入）
+							return ctx.ui.input(title, placeholder);
+						},
+						confirm: (title, message) => ctx.ui.confirm(title, message),
+						say: (text) => notify(text, "info"),
+						// 诊断增强（2026-09-24）：ssh2 主路径失败时用 error 级弹窗强提醒，
+						// 确保失败原因不会被后续输出刷掉（owner 实测时没看到失败原因行）
+						setupError: (text) => notify(text, "error"),
+						status: (text) => {
+							try {
+								ctx.ui.setWidget("rl-setup", text ? [text] : undefined, { placement: "aboveEditor" });
+							} catch {
+								// 没 UI 就算了
+							}
+						},
 					},
-				});
+					presets.host || presets.user ? presets : undefined,
+				);
 				// 无论成功失败都清掉状态行（setup 内部有多个提前 return 的分支）
 				try {
 					ctx.ui.setWidget("rl-setup", undefined);
