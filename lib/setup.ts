@@ -36,6 +36,16 @@ interface Ssh2Stream {
 interface Ssh2Client {
 	on(event: "ready", fn: () => void): Ssh2Client;
 	on(event: "error", fn: (e: Error) => void): Ssh2Client;
+	on(
+		event: "keyboard-interactive",
+		fn: (
+			name: string,
+			instr: string,
+			lang: string,
+			prompts: Array<{ prompt: string; echo: boolean }>,
+			finish: (responses: string[]) => void,
+		) => void,
+	): Ssh2Client;
 	exec(cmd: string, cb: (err: Error | undefined, stream: Ssh2Stream) => void): void;
 	end(): void;
 	connect(cfg: Record<string, unknown>): void;
@@ -103,7 +113,20 @@ async function installKeyViaSsh2(
 			});
 		});
 		conn.on("error", (e) => done({ ok: false, err: e.message }));
-		conn.connect({ host, port: 22, username: user, password, readyTimeout: 15000 });
+		// 2026-09-24 实测：owner 用同一密码手动 ssh 登录成功，但 ssh2 默认只发
+		// `password` 认证会失败——部分服务器只开 keyboard-interactive。显式
+		// 开启 tryKeyboard 并响应 cb，两种认证方式都覆盖。
+		conn.on("keyboard-interactive", (_name, _instr, _ilang, _prompts, finish) => {
+			finish([password]);
+		});
+		conn.connect({
+			host,
+			port: 22,
+			username: user,
+			password,
+			tryKeyboard: true,
+			readyTimeout: 15000,
+		});
 	});
 }
 
