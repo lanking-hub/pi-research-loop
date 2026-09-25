@@ -1114,17 +1114,16 @@ async function fixSshViaAgent(pi: ExtensionAPI): Promise<void> {
 		"### 完成标志：",
 		`ssh -o BatchMode=yes ${alias} "echo ok" 返回 ok。`,
 		"完成后向我汇报：做了什么、还差什么（如有）。",
-	].join("\n");
+		].join("\n");
 
-	notify(
-		[
-			"已把诊断与修复任务交给 agent（见对话）。",
-			"agent 修完后，回来敲 /rl doctor 复查；若它判定「需要装公钥」，",
-			"仍需你手动执行它给出的命令（涉及服务器密码，agent 无权代办）。",
-		].join("
-"),
-		"info",
-	);
+		notify(
+			[
+				"已把诊断与修复任务交给 agent（见对话）。",
+				"agent 修完后，回来敲 /rl doctor 复查；若它判定「需要装公钥」，",
+				"仍需你手动执行它给出的命令（涉及服务器密码，agent 无权代办）。",
+			].join("\n"),
+			"info",
+		);
 	await wake(pi, prompt);
 }
 
