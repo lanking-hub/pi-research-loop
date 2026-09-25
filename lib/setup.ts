@@ -397,7 +397,8 @@ export async function runSetup(ui: SetupUI, presets?: { host?: string; user?: st
 			}
 			lines.push(`✗ 自动安装失败：${res.err}`);
 			ui.setupError?.(`装公钥失败：${res.err}（已降级为手动方式，原因见下方输出）`);
-			lines.push("  改用手动方式：");
+			lines.push("  或者运行 /rl fix-ssh 让 agent 接手诊断修复。");
+			lines.push("  手动方式：");
 		} else if (ssh2 && password === "") {
 			lines.push("已跳过。改用手动方式：");
 		} else if (ssh2 && password === undefined) {

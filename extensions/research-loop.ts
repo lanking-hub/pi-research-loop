@@ -1066,6 +1066,68 @@ function stopPolling(): void {
 	pollInFlight = false;
 }
 
+/**
+ * /rl fix-ssh —— setup 自动装公钥失败后，把诊断与修复交给 agent。
+ *
+ * 设计边界（与 owner 敲定）：
+ *   - agent 负责它能做的：环境诊断、权限修复、known_hosts、ssh config 生成；
+ *   - 密码永远不进提示词（不进模型上下文）——需要密码的环节仍由用户在
+ *     ssh2 密码框完成，或人工执行打印的命令；
+ *   - SSH 纪律随提示词走：只准走别名正门，禁止 wsl ssh / 裸 IP。
+ *
+ * 流程：组装诊断提示词 → 发给 agent（消耗一次 LLM 调用，所以做成显式命令）
+ *       → agent 干完后用户敲 /rl doctor 验证（不自动验证，避免与 agent 抢占）。
+ */
+async function fixSshViaAgent(pi: ExtensionAPI): Promise<void> {
+	cfg = loadConfig();
+	const alias = cfg.sshHost === PLACEHOLDER ? SSH_ALIAS : cfg.sshHost;
+	const runsPath = cfg.runsPath === PLACEHOLDER ? "" : cfg.runsPath;
+
+	const prompt = [
+		"## 任务：诊断并修复本机到 GPU 服务器的 SSH 免密配置",
+		"",
+		`背景：/rl setup 自动配置 SSH 免密失败。目标别名：\`${alias}\`（~/.ssh/config 里），`,
+		`对应一台 Linux GPU 服务器。${runsPath ? `实验目录：\`${runsPath}\`。` : ""}`,
+		"公钥文件在 ~/.ssh/*.pub（可能尚未生成，没有就先 ssh-keygen -t ed25519 生成）。",
+		"",
+		"### 请按顺序执行：",
+		"1. 确认本机 ssh 可用、钥匙对存在（缺则生成：ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519）",
+		"2. 读 ~/.ssh/config，确认别名条目存在且 HostName/User 正确（缺则生成）",
+		"3. ssh-keyscan 登记服务器指纹到 known_hosts（绕开首连交互确认）",
+		`4. 试连：ssh -o BatchMode=yes -o ConnectTimeout=8 ${alias} "echo ok"`,
+		"   - 成功 → 跳到第 6 步",
+		"   - Permission denied → 公钥未装上服务器。**提示用户**在终端执行：",
+		"     `type %USERPROFILE%\.ssh\id_ed25519.pub | ssh <user>@<host> \"mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys\"`",
+		"     （macOS/Linux 用 ssh-copy-id <user>@<host>），装完再回到第 4 步验证",
+		"   - 服务器禁密码登录（PasswordAuthentication no）→ 告知用户只能手动装公钥",
+		"     或找管理员，然后跳到第 6 步",
+		"5. 确认服务器端权限：ssh 别名 \"chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys\"",
+		`6. ${runsPath ? `确认 ${runsPath} 目录存在（缺则创建）` : "确认 runs 目录路径（问我要）"}`,
+		"7. 上传仓库 server/ 目录下的脚本到服务器 ~/bin/ 并 chmod +x（如有）",
+		"",
+		"### 纪律（必须遵守）：",
+		"- **只准走别名正门**（ssh " + alias + ' "命令"），禁止 wsl ssh / 裸 IP / 其他路径',
+		"- 服务器密码**不会也不应**提供给你；需要密码的环节提示用户手动执行",
+		"- 不读取任何私钥文件的内容（只检查存在性）",
+		"- 不动服务器上别人的文件和进程",
+		"",
+		"### 完成标志：",
+		`ssh -o BatchMode=yes ${alias} "echo ok" 返回 ok。`,
+		"完成后向我汇报：做了什么、还差什么（如有）。",
+	].join("\n");
+
+	notify(
+		[
+			"已把诊断与修复任务交给 agent（见对话）。",
+			"agent 修完后，回来敲 /rl doctor 复查；若它判定「需要装公钥」，",
+			"仍需你手动执行它给出的命令（涉及服务器密码，agent 无权代办）。",
+		].join("
+"),
+		"info",
+	);
+	await wake(pi, prompt);
+}
+
 /** 已知子命令。不在这个集合里的输入都当成「一句话任务」交给 agent */
 const SUBCOMMANDS = new Set([
 	"start", "on", "stop", "off", "status", "goal",
@@ -1460,6 +1522,13 @@ export default function (pi: ExtensionAPI) {
 
 			if (a === "doctor" || a === "check") {
 				await doctor();
+				return;
+			}
+
+			// /rl fix-ssh —— setup 装公钥失败时，把诊断与修复交给 agent。
+			// 只组装提示词 + 验证结果，密码永远不进提示词（owner 的安全线）。
+			if (a === "fix-ssh" || a === "fixssh") {
+				await fixSshViaAgent(pi);
 				return;
 			}
 

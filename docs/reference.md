@@ -18,6 +18,7 @@
 | `/rl models` | 编辑模型链（键盘排序，存全局配置）。额度耗尽时按链顺序自动切换 |
 | `/rl doctor` | 环境体检（只读） |
 | `/rl setup` | 首次一站式：生成项目文件 + 配 ssh（需要 TUI 模式） |
+| `/rl fix-ssh` | setup 装公钥失败时，把 SSH 诊断修复交给 agent（密码不经过 agent） |
 | `/rl help` | 显示所有命令的说明（`-h` / `--help` / `?` 同样有效） |
 
 ## 工具（agent 可调用）
