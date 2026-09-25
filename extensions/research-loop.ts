@@ -1474,6 +1474,9 @@ export default function (pi: ExtensionAPI) {
 					ask: (title, placeholder) => ctx.ui.input(title, placeholder),
 					confirm: (title, message) => ctx.ui.confirm(title, message),
 					say: (text) => notify(text, "info"),
+					// 诊断增强（2026-09-24）：ssh2 主路径失败时用 error 级弹窗强提醒，
+					// 确保失败原因不会被后续输出刷掉（owner 实测时没看到失败原因行）
+					setupError: (text) => notify(text, "error"),
 					status: (text) => {
 						try {
 							ctx.ui.setWidget("rl-setup", text ? [text] : undefined, { placement: "aboveEditor" });

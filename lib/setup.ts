@@ -113,6 +113,8 @@ export interface SetupUI {
 	ask(title: string, placeholder?: string): Promise<string | undefined>;
 	/** 等用户确认；取消返回 false */
 	confirm(title: string, message: string): Promise<boolean>;
+	/** 错误级强提醒（失败原因必须让用户看到，不能被后续输出刷掉） */
+	setupError?(text: string): void;
 	/**
 	 * 立刻把一段文字显示给用户。
 	 * 必须有：报告是在 setup 跑完后才统一输出的，而 confirm 是中途弹的，
@@ -371,6 +373,7 @@ export async function runSetup(ui: SetupUI): Promise<SetupReport> {
 				continue;
 			}
 			lines.push(`✗ 自动安装失败：${res.err}`);
+			ui.setupError?.(`装公钥失败：${res.err}（已降级为手动方式，原因见下方输出）`);
 			lines.push("  改用手动方式：");
 		} else if (ssh2 && password === "") {
 			lines.push("已跳过。改用手动方式：");

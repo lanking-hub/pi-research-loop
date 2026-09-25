@@ -113,7 +113,7 @@ export function loadConfig(): Config {
 				// 数字字段填成非数字（"abc"、null、""）就忽略，用默认值。
 				// 不拦的话这个值会原样拼进 shell：find ... -mmin -NaN → 报错被
 				// 2>/dev/null 吃掉 → 永远判「活着」，功能静默失效且没有任何提示。
-				if (typeof (DEFAULTS as Record<string, unknown>)[k] === "number") {
+				if (typeof (DEFAULTS as unknown as Record<string, unknown>)[k] === "number") {
 					const n = toNumber(v);
 					if (!Number.isFinite(n)) continue;
 					clean[k] = n;
@@ -143,7 +143,7 @@ export function invalidConfigKeys(): string[] {
 			const raw = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
 			for (const [k, v] of Object.entries(raw)) {
 				if (v === PLACEHOLDER) continue;
-				if (typeof (DEFAULTS as Record<string, unknown>)[k] !== "number") continue;
+				if (typeof (DEFAULTS as unknown as Record<string, unknown>)[k] !== "number") continue;
 				if (!Number.isFinite(toNumber(v))) bad.add(k);
 			}
 		} catch {
